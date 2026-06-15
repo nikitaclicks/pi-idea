@@ -169,8 +169,8 @@ ${featureLines}
 - When implementation begins, work inside this project directory.
 - Prefer creating reusable run/stop scripts in \`scripts/\`.
 - If a preview can run locally, record runtime details in \`runtime.json\`.
-- If \`cloudflared\` is available and a web app is running, prefer a tunnel-first preview workflow and record the public URL.
-- Surface the public tunnel URL as the primary preview URL when available.
+- Do not serve on localhost alone. After implementing, create a tunnel with \`cloudflared\` and record the public URL as the primary preview URL. Surface the public tunnel URL as the primary preview URL.
+- If \`cloudflared\` is unavailable, stop and ask the user to install it rather than defaulting to localhost.
 - For interactive web apps, verify that the preview works without manual refreshes; avoid stale asset caching during preview and account for shared tunnel preview limitations or transport quirks.
 
 ## Runtime
@@ -362,10 +362,10 @@ function goPrompt(idea: IdeaState) {
     `Read ${idea.requirementsPath} first, then implement the project in that workspace.`,
     "Preserve prior work, update the spec if needed, and apply the latest requested changes.",
     "If the project is runnable, create scripts/run.sh and scripts/stop.sh when appropriate, and keep runtime.json updated.",
-    "For local web apps, prefer a tunnel-first preview workflow: scripts/run.sh should be the operator-facing start command, and when cloudflared is available it should surface the public tunnel URL as the primary preview URL instead of the local URL.",
-    "If cloudflared is available and the app is a local web service, open a tunnel, record both local and public URLs in runtime.json, and set the public URL as the preferred preview URL.",
-    "For interactive web apps, validate the primary flows through the shared preview URL itself. Do not leave the preview in a state where users need manual refreshes after actions; fix caching, transport, or realtime update issues as part of the implementation. Be mindful that shared tunnel previews can behave differently than localhost.",
-    "When you finish, summarize what changed and include the primary preview URL if available.",
+    "For web apps, do not serve on localhost alone. After implementing the server, create a tunnel with cloudflared, record the public URL as the primary preview URL, and surface only the tunnel URL to the user. The local URL is a fallback for debugging only.",
+    "If cloudflared is not available, stop and ask the user to install it rather than defaulting to a localhost-only preview.",
+    "Validate the primary flows through the shared tunnel URL itself. Do not leave the preview in a state where users need manual refreshes after actions; fix caching, transport, or realtime update issues as part of the implementation.",
+    "When you finish, summarize what changed and include the tunnel URL.",
   ].join("\n");
 }
 
@@ -398,9 +398,9 @@ Behavior rules:
 - Unless the user explicitly says "go", "implement", "build", "run", or clearly asks you to start coding, stay in specification / planning / review mode.
 - When the user explicitly says "go" or otherwise asks you to implement, read requirements.md first and then work inside this workspace.
 - Prefer reusable scripts/run.sh and scripts/stop.sh for long-running previews.
-- For local web apps, prefer a tunnel-first preview workflow: surface the public tunnel URL as the primary preview URL when available.
-- If a local web app is running and cloudflared is available, expose it and record the public URL in runtime.json.
-- Whenever you start, stop, or change a preview runtime, update runtime.json with preferred, public, and local URLs when applicable.
+- For web apps, use a tunnel — do not serve on localhost alone. After implementing, start cloudflared and record the public tunnel URL as the primary preview URL. The local URL is a fallback for debugging only.
+- If cloudflared is unavailable, stop and ask the user to install it rather than defaulting to a localhost-only preview.
+- Whenever you start, stop, or change a preview runtime, update runtime.json with public URL as preferredPreviewUrl and local URL as a fallback.
 - For interactive web apps, ensure the shared preview behaves correctly without manual refreshes; watch for stale cached assets and tunnel-specific transport or realtime quirks through the shared URL.
 - When the user asks for more changes after a previous implementation, update the spec first and then apply the changes only when they explicitly ask you to proceed.
 `;
