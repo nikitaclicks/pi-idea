@@ -1,10 +1,10 @@
 # pi-idea
 
-A local Pi extension for idea-to-prototype workflows.
+A Pi extension for chat-driven idea-to-prototype workflows.
 
 ## What it does
 
-- `/idea <rough description>` creates a new idea workspace under `~/dev/ideas/`
+- `/idea <rough description>` creates a new idea workspace under the configured ideas root (default: `~/dev/ideas/`)
 - generates a short project name
 - writes `requirements.md`, `idea.json`, and `runtime.json`
 - tells Pi to ask clarifying questions instead of implementing immediately
@@ -29,22 +29,35 @@ After `/idea ...`, you can also just continue talking normally in the same Pi se
 
 ## Install
 
-```bash
-pi install /home/nikita/dev/pi-idea
-```
-
-Or test directly:
+Clone the repo and install via Pi:
 
 ```bash
-pi -e /home/nikita/dev/pi-idea/extensions/index.ts
+git clone <repo-url>
+pi install ./pi-idea
 ```
+
+Or test directly with `-e`:
+
+```bash
+pi -e ./pi-idea/extensions/index.ts
+```
+
+## Configuration
+
+The ideas workspace root directory can be set via the `PI_IDEA_ROOT` environment variable:
+
+```bash
+export PI_IDEA_ROOT=~/projects/my-ideas
+```
+
+Defaults to `~/dev/ideas/` when unset.
 
 ## Workspace layout
 
-Each idea is created under:
+Each idea is created under the configured ideas root (default `~/dev/ideas/`):
 
 ```text
-~/dev/ideas/<short-name>/
+<ideas-root>/<short-name>/
   requirements.md
   idea.json
   runtime.json

@@ -38,7 +38,16 @@ type MetaState = {
 };
 
 const STATE_TYPE = "pi-idea-state";
-const IDEAS_ROOT = join(homedir(), "dev", "ideas");
+const IDEAS_ROOT = (() => {
+  const env = process.env.PI_IDEA_ROOT;
+  if (env) {
+    // Resolve ~ if present, otherwise treat as-is
+    return env.startsWith("~/") || env === "~"
+      ? join(homedir(), env.slice(1))
+      : join(env);
+  }
+  return join(homedir(), "dev", "ideas");
+})();
 const DEFAULT_SESSION_NAME_PREFIX = "idea:";
 const STOPWORDS = new Set([
   "a", "an", "and", "app", "application", "assistant", "bot", "build", "create",
