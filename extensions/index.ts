@@ -437,8 +437,8 @@ function helpText(): string {
     "  /idea <description>    Create a new idea from a rough description",
     "  /idea                  Show current active idea or list existing ideas",
     "  /idea use <name>       Attach to an existing idea workspace",
-    "  /idea run [name]           Start the preview for an existing idea
-  /idea status [name]        Show status of active idea or a named one",
+    "  /idea run [name]           Start the preview for an existing idea",
+    "  /idea status [name]        Show status of active idea or a named one",
     "  /idea go               Start implementing the active idea",
     "  /idea stop             Stop the active app/tunnel",
     "  /idea clear            Detach from the active idea",
