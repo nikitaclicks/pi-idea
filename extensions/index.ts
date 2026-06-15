@@ -415,6 +415,59 @@ function sendOrQueue(pi: ExtensionAPI, ctx: ExtensionCommandContext, text: strin
   }
 }
 
+function helpText(): string {
+  return [
+    "Usage: /idea [subcommand] [args]",
+    "",
+    "Subcommands:",
+    "  /idea <description>    Create a new idea from a rough description",
+    "  /idea                  Show current active idea or list existing ideas",
+    "  /idea use <name>       Attach to an existing idea workspace",
+    "  /idea status [name]    Show status of active idea or a named one",
+    "  /idea go               Start implementing the active idea",
+    "  /idea stop             Stop the active app/tunnel",
+    "  /idea clear            Detach from the active idea",
+    "  /idea help [subcmd]    Show this help, or help for a specific subcommand",
+    "",
+    "Flags:",
+    "  -h, --help             Show this help message",
+    "",
+    "Examples:",
+    "  /idea a todo app with auth and a dashboard",
+    "  /idea use my-todo-app",
+    "  /idea status",
+    "  /idea go",
+  ].join("\n");
+}
+
+function subcommandHelp(subcommand: string): string | null {
+  const help: Record<string, string> = {
+    "use": `Usage: /idea use <name>
+
+Attach to an existing idea workspace by its short name.
+Use /idea (with no args) to list available ideas.`,
+    "status": `Usage: /idea status [name]
+
+Show the current state of an idea, including its path,
+status, and any running preview URLs.
+Omit name to show the active idea.`,
+    "go": `Usage: /idea go
+
+Tell Pi to start implementing the active idea.
+The extension reads requirements.md and begins coding.
+Only works if an idea is currently active.`,
+    "stop": `Usage: /idea stop
+
+Stop the running preview server or tunnel for the active idea.
+Runs scripts/stop.sh if it exists, then updates runtime.json.`,
+    "clear": `Usage: /idea clear
+
+Detach the current Pi session from the active idea.
+The idea workspace is preserved and can be re-attached with /idea use.`,
+  };
+  return help[subcommand] ?? null;
+}
+
 function updateIdeaStatus(ctx: ExtensionCommandContext | Parameters<Parameters<ExtensionAPI["on"]>[1]>[1], activeIdea: IdeaState | null) {
   ctx.ui.setStatus("idea", activeIdea ? `idea: ${activeIdea.name}` : undefined);
 }
@@ -454,6 +507,17 @@ export default function ideaExtension(pi: ExtensionAPI) {
 
       const [subcommand, ...restParts] = input.split(/\s+/);
       const rest = restParts.join(" ").trim();
+
+      // Handle help flags
+      if (["--help", "-h", "help"].includes(subcommand)) {
+        if (rest) {
+          const subHelp = subcommandHelp(rest);
+          ctx.ui.notify(subHelp ?? `Unknown subcommand: ${rest}`, subHelp ? "info" : "warning");
+          return;
+        }
+        ctx.ui.notify(helpText(), "info");
+        return;
+      }
 
       if (["status", "show"].includes(subcommand)) {
         const target = rest ? findIdea(rest) : activeIdea;
