@@ -1,11 +1,24 @@
 {
   "name": "pi-idea",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Pi extension for chat-driven idea-to-prototype workflows",
-  "keywords": ["pi-package"],
+  "version": "0.1.1",
+  "private": false,
+  "description": "Turn a single-shot idea into a live, internet-accessible prototype — /idea, clarify, go, done.",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nikitaclicks/pi-idea.git"
+  },
+  "homepage": "https://github.com/nikitaclicks/pi-idea",
+  "bugs": {
+    "url": "https://github.com/nikitaclicks/pi-idea/issues"
+  },
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": [
+      "./extensions"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
