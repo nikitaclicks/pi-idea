@@ -1,0 +1,13 @@
+{
+  "name": "pi-idea",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pi extension for chat-driven idea-to-prototype workflows",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
