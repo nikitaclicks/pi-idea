@@ -354,6 +354,20 @@ function resumePrompt(idea: IdeaState) {
   ].join("\n");
 }
 
+function runPrompt(idea: IdeaState) {
+  saveMeta(idea, { status: "running" });
+  return [
+    `Run the preview for idea ${idea.name}.`,
+    `Workspace: ${idea.root}`,
+    `Do NOT re-implement or rebuild. The project is already implemented.`,
+    `If ${idea.runtimePath} shows scripts/run.sh or scripts/tunnel-run.sh, run them.`,
+    `If scripts do not exist yet, start the server and create them for future reuse.`,
+    `For web apps, use a tunnel — do not serve on localhost alone. Start cloudflared and record the public tunnel URL as the primary preview URL.`,
+    `Update ${idea.runtimePath} with the URLs, port, and running state.`,
+    `When done, summarize what is running and include the preview URL.`,
+  ].join("\n");
+}
+
 function goPrompt(idea: IdeaState) {
   saveMeta(idea, { status: "ready" });
   return [
@@ -423,7 +437,8 @@ function helpText(): string {
     "  /idea <description>    Create a new idea from a rough description",
     "  /idea                  Show current active idea or list existing ideas",
     "  /idea use <name>       Attach to an existing idea workspace",
-    "  /idea status [name]    Show status of active idea or a named one",
+    "  /idea run [name]           Start the preview for an existing idea
+  /idea status [name]        Show status of active idea or a named one",
     "  /idea go               Start implementing the active idea",
     "  /idea stop             Stop the active app/tunnel",
     "  /idea clear            Detach from the active idea",
@@ -451,6 +466,13 @@ Use /idea (with no args) to list available ideas.`,
 Show the current state of an idea, including its path,
 status, and any running preview URLs.
 Omit name to show the active idea.`,
+    "run": `Usage: /idea run [name]
+
+Start the preview for an idea that is already implemented.
+If name is provided, attaches to that idea first.
+Runs scripts/run.sh and scripts/tunnel-run.sh if they exist,
+otherwise starts the server and creates the scripts for reuse.
+Records the preview URLs in runtime.json.`,
     "go": `Usage: /idea go
 
 Tell Pi to start implementing the active idea.
@@ -554,6 +576,21 @@ export default function ideaExtension(pi: ExtensionAPI) {
         updateIdeaStatus(ctx, activeIdea);
         ctx.ui.notify(`Attached to ${activeIdea.name}`, "info");
         sendOrQueue(pi, ctx, resumePrompt(activeIdea));
+        return;
+      }
+
+      if (subcommand === "run") {
+        const target = rest ? findIdea(rest) : activeIdea;
+        if (!target) {
+          ctx.ui.notify("No matching idea. Use /idea use <name> or /idea run <name>.", "warning");
+          return;
+        }
+        activeIdea = target;
+        persistActiveIdea(pi, activeIdea);
+        pi.setSessionName(`${DEFAULT_SESSION_NAME_PREFIX}${activeIdea.name}`);
+        updateIdeaStatus(ctx, activeIdea);
+        ctx.ui.notify(`Starting preview for ${activeIdea.name}`, "info");
+        sendOrQueue(pi, ctx, runPrompt(activeIdea));
         return;
       }
 

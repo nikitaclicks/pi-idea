@@ -34,6 +34,7 @@ You:  Share the URL with anyone
 | `/idea` | Show current active idea or list existing ideas |
 | `/idea use <name>` | Attach to an existing idea workspace |
 | `/idea status` | Show active idea status & preview URLs |
+| `/idea run [name]` | Start the preview (server + tunnel) for an existing idea |
 | `/idea go` | Tell Pi to implement and run the active idea |
 | `/idea stop` | Stop the running app / tunnel |
 | `/idea clear` | Detach from the active idea |
