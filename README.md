@@ -12,6 +12,8 @@ A local Pi extension for idea-to-prototype workflows.
 - lets you iterate naturally in chat after `/idea`
 - when you later say `go` in that same Pi session, Pi should implement, run, and optionally tunnel the app in the same workspace
 - for local web apps, the tunnel URL should be treated as the primary preview URL when available
+- for interactive web apps, preview validation should happen against the shared URL and should not require manual page refreshes after actions
+- shared tunnel previews may have transport or caching quirks compared with localhost, so the shared URL should be treated as its own environment to validate
 
 ## Commands
 
@@ -51,4 +53,4 @@ Each idea is created under:
   scripts/
 ```
 
-Pi is expected to update `requirements.md`, implement in `src/`, document in `docs/`, and keep `runtime.json` up to date when it starts/stops preview processes. For local web apps, `runtime.json` should record local and public URLs, with the public tunnel URL preferred when available.
+Pi is expected to update `requirements.md`, implement in `src/`, document in `docs/`, and keep `runtime.json` up to date when it starts/stops preview processes. For local web apps, `runtime.json` should record local and public URLs, with the public tunnel URL preferred when available. For interactive web apps, Pi should validate the shared preview itself, avoid stale asset caching during preview, make sure actions update the UI without requiring manual refreshes, and account for tunnel-specific transport quirks that may not appear on localhost.
