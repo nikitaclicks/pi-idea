@@ -11,6 +11,7 @@ A local Pi extension for idea-to-prototype workflows.
 - keeps an active idea attached to the current Pi session
 - lets you iterate naturally in chat after `/idea`
 - when you later say `go` in that same Pi session, Pi should implement, run, and optionally tunnel the app in the same workspace
+- for local web apps, the tunnel URL should be treated as the primary preview URL when available
 
 ## Commands
 
@@ -50,4 +51,4 @@ Each idea is created under:
   scripts/
 ```
 
-Pi is expected to update `requirements.md`, implement in `src/`, document in `docs/`, and keep `runtime.json` up to date when it starts/stops local preview processes.
+Pi is expected to update `requirements.md`, implement in `src/`, document in `docs/`, and keep `runtime.json` up to date when it starts/stops preview processes. For local web apps, `runtime.json` should record local and public URLs, with the public tunnel URL preferred when available.

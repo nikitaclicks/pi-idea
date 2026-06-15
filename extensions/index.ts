@@ -18,7 +18,11 @@ type RuntimeState = {
   running?: boolean;
   port?: number | string;
   url?: string;
+  localUrl?: string;
+  publicUrl?: string;
+  preferredUrl?: string;
   startCommand?: string;
+  tunnelCommand?: string;
   stopCommand?: string;
   updatedAt?: string;
   [key: string]: unknown;
@@ -125,10 +129,14 @@ function nextIdeaRootDir(baseName: string) {
 function requirementsFor(meta: MetaState, runtime: RuntimeState) {
   const features = splitFeatures(meta.summary);
   const featureLines = features.length > 0 ? features.map((f) => `- ${f}`).join("\n") : "- TBD";
+  const preferredUrl = runtime.preferredUrl || runtime.publicUrl || runtime.url || runtime.localUrl;
   const runtimeLines = [
-    runtime.url ? `- Preview URL: ${runtime.url}` : "- Preview URL: not running",
+    preferredUrl ? `- Preferred preview URL: ${preferredUrl}` : "- Preferred preview URL: not running",
+    runtime.publicUrl ? `- Public URL: ${runtime.publicUrl}` : "- Public URL: not running",
+    runtime.localUrl ? `- Local URL: ${runtime.localUrl}` : runtime.url ? `- Local URL: ${runtime.url}` : "- Local URL: not running",
     runtime.port ? `- Port: ${runtime.port}` : "- Port: not running",
     runtime.startCommand ? `- Start command: \`${runtime.startCommand}\`` : "- Start command: TBD",
+    runtime.tunnelCommand ? `- Tunnel command: \`${runtime.tunnelCommand}\`` : "- Tunnel command: TBD",
     runtime.stopCommand ? `- Stop command: \`${runtime.stopCommand}\`` : "- Stop command: TBD",
   ].join("\n");
   const questions = defaultQuestions(meta.summary).map((q) => `- ${q}`).join("\n");
@@ -152,7 +160,8 @@ ${featureLines}
 - When implementation begins, work inside this project directory.
 - Prefer creating reusable run/stop scripts in \`scripts/\`.
 - If a preview can run locally, record runtime details in \`runtime.json\`.
-- If \`cloudflared\` is available and a web app is running, expose it and record the public URL.
+- If \`cloudflared\` is available and a web app is running, prefer a tunnel-first preview workflow and record the public URL.
+- Surface the public tunnel URL as the primary preview URL when available.
 
 ## Runtime
 ${runtimeLines}
@@ -180,6 +189,9 @@ function createIdea(summary: string): IdeaState {
   };
   const runtime: RuntimeState = {
     running: false,
+    startCommand: "scripts/run.sh",
+    tunnelCommand: "scripts/tunnel-run.sh",
+    stopCommand: "scripts/stop.sh",
     updatedAt: createdAt,
   };
 
@@ -280,13 +292,16 @@ function saveRuntime(state: IdeaState, patch: Partial<RuntimeState>) {
 function renderStatus(state: IdeaState) {
   const meta = readMeta(state);
   const runtime = readRuntime(state);
+  const preview = runtime.preferredUrl || runtime.publicUrl || runtime.url || runtime.localUrl;
   return [
     `Idea: ${state.name}`,
     `Path: ${state.root}`,
     `Status: ${meta.status}`,
-    runtime.url ? `Preview: ${runtime.url}` : "Preview: not running",
+    preview ? `Preview: ${preview}` : "Preview: not running",
+    runtime.publicUrl ? `Public URL: ${runtime.publicUrl}` : null,
+    runtime.localUrl ? `Local URL: ${runtime.localUrl}` : null,
     runtime.port ? `Port: ${runtime.port}` : "Port: not running",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function persistActiveIdea(pi: ExtensionAPI, idea: IdeaState | null) {
@@ -336,9 +351,10 @@ function goPrompt(idea: IdeaState) {
     `Workspace: ${idea.root}`,
     `Read ${idea.requirementsPath} first, then implement the project in that workspace.`,
     "Preserve prior work, update the spec if needed, and apply the latest requested changes.",
-    "If the project is runnable, start it locally, create scripts/run.sh and scripts/stop.sh when appropriate, and keep runtime.json updated.",
-    "If cloudflared is available and the app is a local web service, open a tunnel and record the public URL in runtime.json.",
-    "When you finish, summarize what changed and include the preview URL if available.",
+    "If the project is runnable, create scripts/run.sh and scripts/stop.sh when appropriate, and keep runtime.json updated.",
+    "For local web apps, prefer a tunnel-first preview workflow: scripts/run.sh should be the operator-facing start command, and when cloudflared is available it should surface the public tunnel URL as the primary preview URL instead of the local URL.",
+    "If cloudflared is available and the app is a local web service, open a tunnel, record both local and public URLs in runtime.json, and set the public URL as the preferred preview URL.",
+    "When you finish, summarize what changed and include the primary preview URL if available.",
   ].join("\n");
 }
 
@@ -349,7 +365,7 @@ function stopPrompt(idea: IdeaState) {
     `Stop the active idea project ${idea.name}.`,
     `Workspace: ${idea.root}`,
     `If scripts/stop.sh exists, use it. Otherwise stop any local preview server or tunnel you started for this workspace.`,
-    `Update ${idea.runtimePath} so it reflects that nothing is running.`,
+    `Update ${idea.runtimePath} so it reflects that nothing is running, including any public tunnel preview state.`,
     "Then tell me what you stopped.",
   ].join("\n");
 }
@@ -371,8 +387,9 @@ Behavior rules:
 - Unless the user explicitly says "go", "implement", "build", "run", or clearly asks you to start coding, stay in specification / planning / review mode.
 - When the user explicitly says "go" or otherwise asks you to implement, read requirements.md first and then work inside this workspace.
 - Prefer reusable scripts/run.sh and scripts/stop.sh for long-running previews.
+- For local web apps, prefer a tunnel-first preview workflow: surface the public tunnel URL as the primary preview URL when available.
 - If a local web app is running and cloudflared is available, expose it and record the public URL in runtime.json.
-- Whenever you start, stop, or change a preview runtime, update runtime.json.
+- Whenever you start, stop, or change a preview runtime, update runtime.json with preferred, public, and local URLs when applicable.
 - When the user asks for more changes after a previous implementation, update the spec first and then apply the changes only when they explicitly ask you to proceed.
 `;
 }
@@ -386,12 +403,16 @@ function sendOrQueue(pi: ExtensionAPI, ctx: ExtensionCommandContext, text: strin
   }
 }
 
+function updateIdeaStatus(ctx: ExtensionCommandContext | Parameters<Parameters<ExtensionAPI["on"]>[1]>[1], activeIdea: IdeaState | null) {
+  ctx.ui.setStatus("idea", activeIdea ? `idea: ${activeIdea.name}` : undefined);
+}
+
 export default function ideaExtension(pi: ExtensionAPI) {
   let activeIdea: IdeaState | null = null;
 
   pi.on("session_start", async (_event, ctx) => {
     activeIdea = restoreActiveIdea(ctx);
-    ctx.ui.setStatus("idea", activeIdea ? `idea: ${activeIdea.name}` : "idea: none");
+    updateIdeaStatus(ctx, activeIdea);
   });
 
   pi.on("before_agent_start", async (event, _ctx) => {
@@ -435,7 +456,7 @@ export default function ideaExtension(pi: ExtensionAPI) {
       if (subcommand === "clear") {
         activeIdea = null;
         persistActiveIdea(pi, null);
-        ctx.ui.setStatus("idea", "idea: none");
+        updateIdeaStatus(ctx, activeIdea);
         ctx.ui.notify("Cleared active idea for this session", "info");
         return;
       }
@@ -454,7 +475,7 @@ export default function ideaExtension(pi: ExtensionAPI) {
         persistActiveIdea(pi, activeIdea);
         saveMeta(activeIdea, { status: "clarifying" });
         pi.setSessionName(`${DEFAULT_SESSION_NAME_PREFIX}${activeIdea.name}`);
-        ctx.ui.setStatus("idea", `idea: ${activeIdea.name}`);
+        updateIdeaStatus(ctx, activeIdea);
         ctx.ui.notify(`Attached to ${activeIdea.name}`, "info");
         sendOrQueue(pi, ctx, resumePrompt(activeIdea));
         return;
@@ -484,7 +505,7 @@ export default function ideaExtension(pi: ExtensionAPI) {
       activeIdea = created;
       persistActiveIdea(pi, activeIdea);
       pi.setSessionName(`${DEFAULT_SESSION_NAME_PREFIX}${created.name}`);
-      ctx.ui.setStatus("idea", `idea: ${created.name}`);
+      updateIdeaStatus(ctx, activeIdea);
       ctx.ui.notify(`Created idea ${created.name} in ${created.root}`, "info");
       sendOrQueue(pi, ctx, kickoffPrompt(created));
     },
