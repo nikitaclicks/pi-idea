@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -21,9 +22,6 @@ type RuntimeState = {
   localUrl?: string;
   publicUrl?: string;
   preferredUrl?: string;
-  startCommand?: string;
-  tunnelCommand?: string;
-  stopCommand?: string;
   updatedAt?: string;
   [key: string]: unknown;
 };
@@ -144,9 +142,6 @@ function requirementsFor(meta: MetaState, runtime: RuntimeState) {
     runtime.publicUrl ? `- Public URL: ${runtime.publicUrl}` : "- Public URL: not running",
     runtime.localUrl ? `- Local URL: ${runtime.localUrl}` : runtime.url ? `- Local URL: ${runtime.url}` : "- Local URL: not running",
     runtime.port ? `- Port: ${runtime.port}` : "- Port: not running",
-    runtime.startCommand ? `- Start command: \`${runtime.startCommand}\`` : "- Start command: TBD",
-    runtime.tunnelCommand ? `- Tunnel command: \`${runtime.tunnelCommand}\`` : "- Tunnel command: TBD",
-    runtime.stopCommand ? `- Stop command: \`${runtime.stopCommand}\`` : "- Stop command: TBD",
   ].join("\n");
   const questions = defaultQuestions(meta.summary).map((q) => `- ${q}`).join("\n");
 
@@ -167,9 +162,13 @@ ${featureLines}
 - Do not implement until the user explicitly says **go**.
 - Keep this file updated as the spec evolves.
 - When implementation begins, work inside this project directory.
-- Prefer creating reusable run/stop scripts in \`scripts/\`.
-- If a preview can run locally, record runtime details in \`runtime.json\`.
-- Do not serve on localhost alone. After implementing, create a tunnel with \`cloudflared\` and record the public URL as the primary preview URL. Surface the public tunnel URL as the primary preview URL.
+- Create the standard scripts: \`scripts/run.sh\`, \`scripts/stop.sh\`, \`scripts/tunnel.sh\`, \`scripts/status.sh\`.
+- Each script updates \`runtime.json\` directly (port, localUrl, publicUrl, preferredUrl).
+- \`scripts/run.sh\` starts the server in the background and waits for it to be reachable.
+- \`scripts/stop.sh\` kills the server and clears runtime state.
+- \`scripts/tunnel.sh\` starts cloudflared and records the public URL.
+- \`scripts/status.sh\` outputs JSON with \`{ running, localUrl, publicUrl, port }\` to stdout.
+- Do not serve on localhost alone. Always use cloudflared tunnel for sharing.
 - If \`cloudflared\` is unavailable, stop and ask the user to install it rather than defaulting to localhost.
 - For interactive web apps, verify that the preview works without manual refreshes; avoid stale asset caching during preview and account for shared tunnel preview limitations or transport quirks.
 
@@ -199,9 +198,6 @@ function createIdea(summary: string): IdeaState {
   };
   const runtime: RuntimeState = {
     running: false,
-    startCommand: "scripts/run.sh",
-    tunnelCommand: "scripts/tunnel-run.sh",
-    stopCommand: "scripts/stop.sh",
     updatedAt: createdAt,
   };
 
@@ -250,6 +246,28 @@ function listIdeas() {
     .map((root) => hydrateIdeaState(root))
     .filter((idea): idea is IdeaState => Boolean(idea))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+const SCRIPT_TIMEOUT = 30_000;
+
+function scriptPath(idea: IdeaState, name: string) {
+  return join(idea.root, "scripts", name);
+}
+
+function hasScript(idea: IdeaState, name: string) {
+  return existsSync(scriptPath(idea, name));
+}
+
+function runScript(idea: IdeaState, name: string, timeout = SCRIPT_TIMEOUT): { ok: boolean; stdout: string; stderr: string } {
+  const path = scriptPath(idea, name);
+  try {
+    const stdout = execSync(`bash "${path}"`, { timeout, encoding: "utf8", stdio: ["inherit", "pipe", "pipe"] });
+    return { ok: true, stdout: stdout.trim(), stderr: "" };
+  } catch (err) {
+    const stdErr = (err as any).stderr?.toString()?.trim() || "";
+    const stdOut = (err as any).stdout?.toString()?.trim() || "";
+    return { ok: false, stdout: stdOut, stderr: stdErr || String(err) };
+  }
 }
 
 function readDirSafe(path: string) {
@@ -354,20 +372,6 @@ function resumePrompt(idea: IdeaState) {
   ].join("\n");
 }
 
-function runPrompt(idea: IdeaState) {
-  saveMeta(idea, { status: "running" });
-  return [
-    `Run the preview for idea ${idea.name}.`,
-    `Workspace: ${idea.root}`,
-    `Do NOT re-implement or rebuild. The project is already implemented.`,
-    `If ${idea.runtimePath} shows scripts/run.sh or scripts/tunnel-run.sh, run them.`,
-    `If scripts do not exist yet, start the server and create them for future reuse.`,
-    `For web apps, use a tunnel — do not serve on localhost alone. Start cloudflared and record the public tunnel URL as the primary preview URL.`,
-    `Update ${idea.runtimePath} with the URLs, port, and running state.`,
-    `When done, summarize what is running and include the preview URL.`,
-  ].join("\n");
-}
-
 function goPrompt(idea: IdeaState) {
   saveMeta(idea, { status: "ready" });
   return [
@@ -380,18 +384,6 @@ function goPrompt(idea: IdeaState) {
     "If cloudflared is not available, stop and ask the user to install it rather than defaulting to a localhost-only preview.",
     "Validate the primary flows through the shared tunnel URL itself. Do not leave the preview in a state where users need manual refreshes after actions; fix caching, transport, or realtime update issues as part of the implementation.",
     "When you finish, summarize what changed and include the tunnel URL.",
-  ].join("\n");
-}
-
-function stopPrompt(idea: IdeaState) {
-  saveMeta(idea, { status: "stopped" });
-  saveRuntime(idea, { running: false });
-  return [
-    `Stop the active idea project ${idea.name}.`,
-    `Workspace: ${idea.root}`,
-    `If scripts/stop.sh exists, use it. Otherwise stop any local preview server or tunnel you started for this workspace.`,
-    `Update ${idea.runtimePath} so it reflects that nothing is running, including any public tunnel preview state.`,
-    "Then tell me what you stopped.",
   ].join("\n");
 }
 
@@ -411,7 +403,11 @@ Behavior rules:
 - Keep requirements.md updated when the user refines scope or changes requirements.
 - Unless the user explicitly says "go", "implement", "build", "run", or clearly asks you to start coding, stay in specification / planning / review mode.
 - When the user explicitly says "go" or otherwise asks you to implement, read requirements.md first and then work inside this workspace.
-- Prefer reusable scripts/run.sh and scripts/stop.sh for long-running previews.
+- Standard scripts contract — you MUST create these scripts during implementation:
+  \`scripts/run.sh\` — start server in background, write {localUrl, port} to runtime.json
+  \`scripts/stop.sh\` — kill server, write {running: false} to runtime.json
+  \`scripts/tunnel.sh\` — start cloudflared, write {publicUrl, preferredUrl} to runtime.json
+  \`scripts/status.sh\` — output JSON {running, localUrl, publicUrl, port} to stdout
 - For web apps, use a tunnel — do not serve on localhost alone. After implementing, start cloudflared and record the public tunnel URL as the primary preview URL. The local URL is a fallback for debugging only.
 - If cloudflared is unavailable, stop and ask the user to install it rather than defaulting to a localhost-only preview.
 - Whenever you start, stop, or change a preview runtime, update runtime.json with public URL as preferredPreviewUrl and local URL as a fallback.
@@ -470,18 +466,18 @@ Omit name to show the active idea.`,
 
 Start the preview for an idea that is already implemented.
 If name is provided, attaches to that idea first.
-Runs scripts/run.sh and scripts/tunnel-run.sh if they exist,
-otherwise starts the server and creates the scripts for reuse.
-Records the preview URLs in runtime.json.`,
+Runs scripts/run.sh and scripts/tunnel.sh deterministically.
+Expects these scripts to have been created by /idea go.`,
     "go": `Usage: /idea go
 
 Tell Pi to start implementing the active idea.
 The extension reads requirements.md and begins coding.
+Creates standard scripts (scripts/run.sh, stop.sh, tunnel.sh, status.sh).
 Only works if an idea is currently active.`,
     "stop": `Usage: /idea stop
 
 Stop the running preview server or tunnel for the active idea.
-Runs scripts/stop.sh if it exists, then updates runtime.json.`,
+Runs scripts/stop.sh deterministically.`,
     "clear": `Usage: /idea clear
 
 Detach the current Pi session from the active idea.
@@ -547,6 +543,22 @@ export default function ideaExtension(pi: ExtensionAPI) {
           ctx.ui.notify("No matching active idea", "warning");
           return;
         }
+        // Try deterministic status script first
+        if (hasScript(target, "status.sh")) {
+          const result = runScript(target, "status.sh", 10_000);
+          if (result.ok && result.stdout) {
+            try {
+              const status = JSON.parse(result.stdout);
+              saveRuntime(target, {
+                running: status.running ?? undefined,
+                localUrl: status.localUrl ?? undefined,
+                publicUrl: status.publicUrl ?? undefined,
+                port: status.port ?? undefined,
+              });
+              if (status.running) saveMeta(target, { status: "running" });
+            } catch {}
+          }
+        }
         ctx.ui.notify(renderStatus(target), "info");
         return;
       }
@@ -589,8 +601,32 @@ export default function ideaExtension(pi: ExtensionAPI) {
         persistActiveIdea(pi, activeIdea);
         pi.setSessionName(`${DEFAULT_SESSION_NAME_PREFIX}${activeIdea.name}`);
         updateIdeaStatus(ctx, activeIdea);
-        ctx.ui.notify(`Starting preview for ${activeIdea.name}`, "info");
-        sendOrQueue(pi, ctx, runPrompt(activeIdea));
+
+        if (!hasScript(activeIdea, "run.sh")) {
+          ctx.ui.notify(`No scripts/run.sh found for ${activeIdea.name}. Run \`/idea go\` to implement it first.`, "warning");
+          return;
+        }
+
+        ctx.ui.notify(`Running ${activeIdea.name}...`, "info");
+        const result = runScript(activeIdea, "run.sh");
+        if (!result.ok) {
+          ctx.ui.notify(`scripts/run.sh failed:\n${result.stderr || result.stdout}`, "error");
+          return;
+        }
+        saveMeta(activeIdea, { status: "running" });
+
+        // Run tunnel if available
+        if (hasScript(activeIdea, "tunnel.sh")) {
+          ctx.ui.notify("Creating tunnel...", "info");
+          const tunnelResult = runScript(activeIdea, "tunnel.sh");
+          if (!tunnelResult.ok) {
+            ctx.ui.notify(`scripts/tunnel.sh failed:\n${tunnelResult.stderr || tunnelResult.stdout}`, "warning");
+          }
+        }
+
+        const runtime = readRuntime(activeIdea);
+        const previewUrl = runtime.preferredUrl || runtime.publicUrl || runtime.localUrl || "unknown";
+        ctx.ui.notify(`${activeIdea.name} running at ${previewUrl}`, "info");
         return;
       }
 
@@ -609,8 +645,20 @@ export default function ideaExtension(pi: ExtensionAPI) {
           ctx.ui.notify("No active idea. Use /idea use <name> first.", "warning");
           return;
         }
-        ctx.ui.notify(`Requesting stop for ${activeIdea.name}`, "info");
-        sendOrQueue(pi, ctx, stopPrompt(activeIdea));
+
+        if (!hasScript(activeIdea, "stop.sh")) {
+          ctx.ui.notify(`No scripts/stop.sh found for ${activeIdea.name}. Run \`/idea go\` to implement it first.`, "warning");
+          return;
+        }
+
+        ctx.ui.notify(`Stopping ${activeIdea.name}...`, "info");
+        const result = runScript(activeIdea, "stop.sh", 10_000);
+        if (!result.ok) {
+          ctx.ui.notify(`scripts/stop.sh failed:\n${result.stderr || result.stdout}`, "warning");
+        }
+        saveMeta(activeIdea, { status: "stopped" });
+        saveRuntime(activeIdea, { running: false });
+        ctx.ui.notify(`${activeIdea.name} stopped`, "info");
         return;
       }
 
