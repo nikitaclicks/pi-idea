@@ -162,15 +162,19 @@ ${featureLines}
 - Do not implement until the user explicitly says **go**.
 - Keep this file updated as the spec evolves.
 - When implementation begins, work inside this project directory.
-- Create the standard scripts: \`scripts/run.sh\`, \`scripts/stop.sh\`, \`scripts/tunnel.sh\`, \`scripts/status.sh\`.
+- Create the standard scripts:
+  \`scripts/run.sh\` — start server in background, write {localUrl, port} to runtime.json
+  \`scripts/stop.sh\` — kill server + tunnel, write {running: false} to runtime.json
+  \`scripts/tunnel.sh\` — start cloudflared, write {publicUrl, preferredUrl} to runtime.json
+  \`scripts/status.sh\` — output JSON {running, localUrl, publicUrl, port} to stdout
+  \`scripts/restart-server.sh\` — restart ONLY the server, keep tunnel alive (same URL!)
+- **SIGHUP hardening**: All background processes MUST use \`nohup\` + \`disown\` so they survive the calling shell exit. Without this, servers die silently when the parent shell finishes.
+- **PID files, not pkill**: To stop/restart servers, write the PID to a file (\`.server.pid\`, \`.tunnel.pid\`) and kill by that PID. Never use \`pkill -f\` with a pattern — it matches any process whose command line contains the string (e.g., \`pkill -f \"node server/index.js\"\` will kill ANY Node.js process with \"server\" in its path, including unrelated gateways). Kill by PID file is precise and safe.
 - Each script updates \`runtime.json\` directly (port, localUrl, publicUrl, preferredUrl).
-- \`scripts/run.sh\` starts the server in the background and waits for it to be reachable.
-- \`scripts/stop.sh\` kills the server and clears runtime state.
-- \`scripts/tunnel.sh\` starts cloudflared and records the public URL.
-- \`scripts/status.sh\` outputs JSON with \`{ running, localUrl, publicUrl, port }\` to stdout.
 - Do not serve on localhost alone. Always use cloudflared tunnel for sharing.
 - If \`cloudflared\` is unavailable, stop and ask the user to install it rather than defaulting to localhost.
-- For interactive web apps, verify that the preview works without manual refreshes; avoid stale asset caching during preview and account for shared tunnel preview limitations or transport quirks.
+- For interactive web apps that use WebSockets (Socket.IO, WS, etc.), cloudflared\'s default QUIC protocol drops the \`Upgrade: websocket\` header, causing \`400 Bad Request\` on connection. **Always add \`--protocol http2\` to the cloudflared command** in \`scripts/tunnel.sh\`.
+- Verify that the preview works without manual refreshes; avoid stale asset caching during preview and account for shared tunnel preview limitations or transport quirks.
 
 ## Runtime
 ${runtimeLines}
@@ -248,7 +252,7 @@ function listIdeas() {
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-const SCRIPT_TIMEOUT = 30_000;
+const SCRIPT_TIMEOUT = 60_000; // generous — cloudflared tunnel can take 15s
 
 function scriptPath(idea: IdeaState, name: string) {
   return join(idea.root, "scripts", name);
@@ -379,9 +383,12 @@ function goPrompt(idea: IdeaState) {
     `Workspace: ${idea.root}`,
     `Read ${idea.requirementsPath} first, then implement the project in that workspace.`,
     "Preserve prior work, update the spec if needed, and apply the latest requested changes.",
-    "If the project is runnable, create scripts/run.sh and scripts/stop.sh when appropriate, and keep runtime.json updated.",
+    "If the project is runnable, create the standard scripts in scripts/ (see requirements.md for the full contract).",
+    "**SIGHUP hardening is mandatory** — all background server processes MUST use `nohup` + `disown` so they survive the calling shell exit. Without this, processes die silently as soon as the agent's shell returns.",
+    "Include `scripts/restart-server.sh` — it restarts only the Node server without touching cloudflared, so the tunnel URL stays the same across restarts.",
     "For web apps, do not serve on localhost alone. After implementing the server, create a tunnel with cloudflared, record the public URL as the primary preview URL, and surface only the tunnel URL to the user. The local URL is a fallback for debugging only.",
     "If cloudflared is not available, stop and ask the user to install it rather than defaulting to a localhost-only preview.",
+    "For web apps that use WebSockets (Socket.IO, WS, etc.): cloudflared's default QUIC protocol drops the `Upgrade: websocket` header. The tunnel script MUST add `--protocol http2` to the cloudflared command.",
     "Validate the primary flows through the shared tunnel URL itself. Do not leave the preview in a state where users need manual refreshes after actions; fix caching, transport, or realtime update issues as part of the implementation.",
     "When you finish, summarize what changed and include the tunnel URL.",
   ].join("\n");
@@ -404,14 +411,19 @@ Behavior rules:
 - Unless the user explicitly says "go", "implement", "build", "run", or clearly asks you to start coding, stay in specification / planning / review mode.
 - When the user explicitly says "go" or otherwise asks you to implement, read requirements.md first and then work inside this workspace.
 - Standard scripts contract — you MUST create these scripts during implementation:
-  \`scripts/run.sh\` — start server in background, write {localUrl, port} to runtime.json
-  \`scripts/stop.sh\` — kill server, write {running: false} to runtime.json
+  \`scripts/run.sh\` — start server in background (use nohup + disown!), write {localUrl, port} to runtime.json
+  \`scripts/stop.sh\` — kill server + tunnel, write {running: false} to runtime.json
   \`scripts/tunnel.sh\` — start cloudflared, write {publicUrl, preferredUrl} to runtime.json
   \`scripts/status.sh\` — output JSON {running, localUrl, publicUrl, port} to stdout
+  \`scripts/restart-server.sh\` — restart ONLY the server, keep tunnel alive (preserves URL!)
+- **SIGHUP hardening**: All background processes MUST use \`nohup\` + \`disown\`. Without this, server and tunnel processes die silently when the agent\'s shell exits.
+- **PID files, not pkill**: Write server/tunnel PIDs to files (e.g. \`.server.pid\`, \`.tunnel.pid\`). Kill by PID, never by \`pkill -f\` pattern — that kills any process whose command line happens to contain the search string (unrelated gateways, other Node servers).
+- **Tunnel URL volatility**: trycloudflare.com quick tunnels change URL on every start. To keep the same URL across restarts, use \`scripts/restart-server.sh\` (leaves cloudflared running).
 - For web apps, use a tunnel — do not serve on localhost alone. After implementing, start cloudflared and record the public tunnel URL as the primary preview URL. The local URL is a fallback for debugging only.
 - If cloudflared is unavailable, stop and ask the user to install it rather than defaulting to a localhost-only preview.
 - Whenever you start, stop, or change a preview runtime, update runtime.json with public URL as preferredPreviewUrl and local URL as a fallback.
-- For interactive web apps, ensure the shared preview behaves correctly without manual refreshes; watch for stale cached assets and tunnel-specific transport or realtime quirks through the shared URL.
+- For interactive web apps that use WebSockets (Socket.IO, WS, etc.), cloudflared\'s default QUIC protocol drops the \`Upgrade: websocket\` header, causing \`400 Bad Request\`. The tunnel script MUST use \`--protocol http2\`.
+- Ensure the shared preview behaves correctly without manual refreshes; watch for stale cached assets and tunnel-specific transport or realtime quirks through the shared URL.
 - When the user asks for more changes after a previous implementation, update the spec first and then apply the changes only when they explicitly ask you to proceed.
 `;
 }
@@ -436,7 +448,7 @@ function helpText(): string {
     "  /idea run [name]           Start the preview for an existing idea",
     "  /idea status [name]        Show status of active idea or a named one",
     "  /idea go               Start implementing the active idea",
-    "  /idea stop             Stop the active app/tunnel",
+    "  /idea restart          Restart server only (keeps tunnel URL)",
     "  /idea clear            Detach from the active idea",
     "  /idea help [subcmd]    Show this help, or help for a specific subcommand",
     "",
@@ -466,22 +478,30 @@ Omit name to show the active idea.`,
 
 Start the preview for an idea that is already implemented.
 If name is provided, attaches to that idea first.
-Runs scripts/run.sh and scripts/tunnel.sh deterministically.
+Runs scripts/run.sh and scripts/tunnel.sh.
+To restart the server without changing the tunnel URL, use:
+  scripts/restart-server.sh
 Expects these scripts to have been created by /idea go.`,
     "go": `Usage: /idea go
 
 Tell Pi to start implementing the active idea.
 The extension reads requirements.md and begins coding.
-Creates standard scripts (scripts/run.sh, stop.sh, tunnel.sh, status.sh).
+Creates standard scripts (run.sh, stop.sh, tunnel.sh, status.sh, restart-server.sh).
+SIGHUP hardening (nohup + disown) is required for all background processes.
 Only works if an idea is currently active.`,
     "stop": `Usage: /idea stop
 
 Stop the running preview server or tunnel for the active idea.
-Runs scripts/stop.sh deterministically.`,
+Runs scripts/stop.sh deterministically.
+This kills BOTH the server and tunnel — the tunnel URL will change on next start.`,
     "clear": `Usage: /idea clear
 
 Detach the current Pi session from the active idea.
 The idea workspace is preserved and can be re-attached with /idea use.`,
+    "restart": `Usage: /idea restart
+
+Restart the server for the active idea without touching the tunnel.
+Keeps the same tunnel URL. Runs scripts/restart-server.sh if available.`,
   };
   return help[subcommand] ?? null;
 }
@@ -659,6 +679,30 @@ export default function ideaExtension(pi: ExtensionAPI) {
         saveMeta(activeIdea, { status: "stopped" });
         saveRuntime(activeIdea, { running: false });
         ctx.ui.notify(`${activeIdea.name} stopped`, "info");
+        return;
+      }
+
+      if (subcommand === "restart") {
+        if (!activeIdea) {
+          ctx.ui.notify("No active idea. Use /idea use <name> first.", "warning");
+          return;
+        }
+
+        if (!hasScript(activeIdea, "restart-server.sh")) {
+          ctx.ui.notify(`No scripts/restart-server.sh found for ${activeIdea.name}. Run \`/idea go\` to implement it first.`, "warning");
+          return;
+        }
+
+        ctx.ui.notify(`Restarting ${activeIdea.name} server (tunnel stays up)...`, "info");
+        const result = runScript(activeIdea, "restart-server.sh");
+        if (!result.ok) {
+          ctx.ui.notify(`scripts/restart-server.sh failed:\n${result.stderr || result.stdout}`, "error");
+          return;
+        }
+        saveMeta(activeIdea, { status: "running" });
+        const runtime = readRuntime(activeIdea);
+        const previewUrl = runtime.preferredUrl || runtime.publicUrl || runtime.localUrl || "unknown";
+        ctx.ui.notify(`${activeIdea.name} restarted at ${previewUrl} (same URL)`, "info");
         return;
       }
 
