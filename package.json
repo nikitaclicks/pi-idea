@@ -1,6 +1,6 @@
 {
   "name": "pi-idea",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": false,
   "description": "Turn a single-shot idea into a live, internet-accessible prototype — /idea, clarify, go, done.",
   "keywords": [
@@ -22,5 +22,8 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
   }
 }

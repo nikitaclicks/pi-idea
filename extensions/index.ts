@@ -69,6 +69,85 @@ const STOPWORDS = new Set([
   "lightweight", "small", "tiny", "personal", "want", "need", "please", "some",
 ]);
 
+const VALID_SUBCOMMANDS = [
+  "new", "create", "use", "run", "status", "show", "go", "stop",
+  "ps", "running", "restart", "domain", "token", "clear", "help",
+];
+
+/** Common typos mapped to correct subcommands */
+const SUBCOMMAND_CORRECTIONS: Record<string, string> = {
+  "statis": "status",
+  "stauts": "status",
+  "statys": "status",
+  "statu": "status",
+  "stats": "status",
+  "statas": "status",
+  "runing": "running",
+  "runnig": "running",
+  "running": "running",
+  "run": "run",
+  "start": "run",
+  "statr": "run",
+  "srart": "run",
+  "srta": "run",
+  "ist": "list",
+  "list": "ps",
+  "ls": "ps",
+  "lits": "ps",
+  "lsit": "ps",
+  "attatch": "use",
+  "atach": "use",
+  "attch": "use",
+  "atach": "use",
+  "new": "new",
+  "nw": "new",
+  "ne": "new",
+  "cleaer": "clear",
+  "clerar": "clear",
+  "clearr": "clear",
+  "dlete": "clear",
+  "delet": "clear",
+};
+
+/** Levenshtein distance for fuzzy matching */
+function levenshteinDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+  }
+  return dp[m][n];
+}
+
+/** Find the closest matching subcommand using typo map + fuzzy matching */
+function findClosestSubcommand(input: string): string | null {
+  const lower = input.toLowerCase();
+  // 1. Check typo corrections first
+  if (SUBCOMMAND_CORRECTIONS[lower]) {
+    return SUBCOMMAND_CORRECTIONS[lower];
+  }
+  // 2. Fuzzy match against valid subcommands (only if within edit distance 2)
+  let bestMatch: string | null = null;
+  let bestDistance = Infinity;
+  for (const sub of VALID_SUBCOMMANDS) {
+    const dist = levenshteinDistance(lower, sub);
+    if (dist < bestDistance && dist <= 2) {
+      bestDistance = dist;
+      bestMatch = sub;
+    }
+  }
+  return bestMatch;
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -867,7 +946,7 @@ function helpText(): string {
     "Usage: /idea [subcommand] [args]",
     "",
     "Subcommands:",
-    "  /idea <description>    Create a new idea from a rough description",
+    "  /idea new <description> Create a new idea from a rough description",
     "  /idea                  Show current active idea or list existing ideas",
     "  /idea use <name>       Attach to an existing idea workspace",
     "  /idea run [name]           Start the preview for an existing idea",
@@ -877,14 +956,14 @@ function helpText(): string {
     "  /idea restart          Restart server only (keeps tunnel URL)",
     "  /idea domain [domain]  Set or show global custom domain (stored in ~/.config/pi-idea.json)",
     "  /idea token [token]    Set or show global Cloudflare API token (stored in ~/.config/pi-idea.json)",
-    "  /idea clear            Detach from the active idea",
+    "  /idea clear --yes      Detach from the active idea (skip confirmation)",
     "  /idea help [subcmd]    Show this help, or help for a specific subcommand",
     "",
     "Flags:",
     "  -h, --help             Show this help message",
     "",
     "Examples:",
-    "  /idea a todo app with auth and a dashboard",
+    "  /idea new a todo app with auth and a dashboard",
     "  /idea domain example.com",
     "  /idea use my-todo-app",
     "  /idea status",
@@ -932,6 +1011,19 @@ If no argument is given, shows whether a token is configured.
 Requires a token with permissions:
   - Cloudflare Tunnel: Edit
   - DNS: Edit`,
+    "new": `Usage: /idea new <description>
+
+Create a new idea from a rough description.
+The description can be anything — a name, a sentence, or bullet points.
+Pi will create a workspace, ask clarifying questions, and refine the spec.
+
+Example:
+  /idea new a todo app with auth and a dashboard
+
+Alias: /idea create`,
+    "create": `Usage: /idea create <description>
+
+Alias for /idea new.`,
     "use": `Usage: /idea use <name>
 
 Attach to an existing idea workspace by its short name.
@@ -961,10 +1053,12 @@ Only works if an idea is currently active.`,
 Stop the running preview server or tunnel for the active idea.
 Runs scripts/stop.sh deterministically.
 This kills BOTH the server and tunnel — the tunnel URL will change on next start.`,
-    "clear": `Usage: /idea clear
+    "clear": `Usage: /idea clear [--yes]
 
 Detach the current Pi session from the active idea.
-The idea workspace is preserved and can be re-attached with /idea use.`,
+The idea workspace is preserved and can be re-attached with /idea use.
+
+Without --yes, shows a confirmation prompt first.`,
     "restart": `Usage: /idea restart
 
 Restart the server for the active idea without touching the tunnel.
@@ -1003,7 +1097,7 @@ export default function ideaExtension(pi: ExtensionAPI) {
         }
         const ideas = listIdeas();
         if (ideas.length === 0) {
-          ctx.ui.notify(`No ideas yet under ${IDEAS_ROOT}`, "info");
+          ctx.ui.notify(`No ideas yet. Create one with: /idea new <description>`, "info");
           return;
         }
         ctx.ui.notify(`Ideas: ${ideas.map((idea) => idea.name).join(", ")}`, "info");
@@ -1051,6 +1145,16 @@ export default function ideaExtension(pi: ExtensionAPI) {
       }
 
       if (subcommand === "clear") {
+        if (!activeIdea) {
+          ctx.ui.notify("No active idea to clear", "info");
+          return;
+        }
+        // Check for --yes flag to skip confirmation
+        const skipConfirm = rest === "--yes" || rest === "-y";
+        if (!skipConfirm) {
+          ctx.ui.notify(`Active idea: ${activeIdea.name}\nUse /idea clear --yes to confirm.`, "info");
+          return;
+        }
         activeIdea = null;
         persistActiveIdea(pi, null);
         updateIdeaStatus(ctx, activeIdea);
@@ -1303,13 +1407,34 @@ export default function ideaExtension(pi: ExtensionAPI) {
         return;
       }
 
-      const created = createIdea(input);
-      activeIdea = created;
-      persistActiveIdea(pi, activeIdea);
-      pi.setSessionName(`${DEFAULT_SESSION_NAME_PREFIX}${created.name}`);
-      updateIdeaStatus(ctx, activeIdea);
-      ctx.ui.notify(`Created idea ${created.name} in ${created.root}`, "info");
-      sendOrQueue(pi, ctx, kickoffPrompt(created));
+      if (subcommand === "new" || subcommand === "create") {
+        if (!rest) {
+          ctx.ui.notify("Usage: /idea new <description>", "warning");
+          return;
+        }
+        const created = createIdea(rest);
+        activeIdea = created;
+        persistActiveIdea(pi, activeIdea);
+        pi.setSessionName(`${DEFAULT_SESSION_NAME_PREFIX}${created.name}`);
+        updateIdeaStatus(ctx, activeIdea);
+        ctx.ui.notify(`Created idea ${created.name} in ${created.root}`, "info");
+        sendOrQueue(pi, ctx, kickoffPrompt(created));
+        return;
+      }
+
+      // Unknown subcommand — try fuzzy match, otherwise show help
+      const suggested = findClosestSubcommand(subcommand);
+      if (suggested) {
+        ctx.ui.notify(
+          `Unknown command: /idea ${subcommand}\n\nDid you mean: /idea ${suggested}?`,
+          "warning",
+        );
+      } else {
+        ctx.ui.notify(
+          `Unknown command: /idea ${subcommand}\n\nRun /idea help for available commands.`,
+          "warning",
+        );
+      }
     },
   });
 }

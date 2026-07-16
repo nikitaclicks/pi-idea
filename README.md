@@ -2,14 +2,14 @@
 
 **Turn a single-shot idea into a live, internet-accessible prototype.**
 
-Type `/idea a multiplayer drawing game` — Pi creates a workspace, asks clarifying questions, and when you say `go`, implements and tunnels the running app so anyone with the URL can try it.
+Type `/idea new a multiplayer drawing game` — Pi creates a workspace, asks clarifying questions, and when you say `go`, implements and tunnels the running app so anyone with the URL can try it.
 
 No repo setup, no deploy config, no "let me spin up a server". Just an idea, a quick conversation to nail the scope, and a tunnel URL back.
 
 ## How it works
 
 ```
-You:  /idea a todo app with auth and a dashboard
+You:  /idea new a todo app with auth and a dashboard
   ↓
 Pi:   Creates ~/dev/ideas/todo-dashboard/
       Writes requirements.md, idea.json, runtime.json
@@ -30,7 +30,7 @@ You:  Share the URL with anyone
 
 | Command | What it does |
 |---------|-------------|
-| `/idea <description>` | Start a new idea from a rough description |
+| `/idea new <description>` | Start a new idea from a rough description |
 | `/idea` | Show current active idea or list existing ideas |
 | `/idea use <name>` | Attach to an existing idea workspace |
 | `/idea status` | Show active idea status & preview URLs |
@@ -40,9 +40,25 @@ You:  Share the URL with anyone
 | `/idea stop` | Stop the running app / tunnel |
 | `/idea domain [domain]` | Set or show **global** custom domain (stored in `~/.config/pi-idea.json`) |
 | `/idea token [token]` | Set or show **global** Cloudflare API token (stored in `~/.config/pi-idea.json`) |
-| `/idea clear` | Detach from the active idea |
+| `/idea clear --yes` | Detach from the active idea (skip confirmation) |
 
-After `/idea`, you can iterate naturally — the extension injects the workspace context into Pi's system prompt so "it", "the app", or plain `go` refer to your active idea.
+After `/idea new`, you can iterate naturally — the extension injects the workspace context into Pi's system prompt so "it", "the app", or plain `go` refer to your active idea.
+
+### Typos and fuzzy matching
+
+Pi-idea includes fuzzy matching for subcommands. If you make a typo:
+
+```
+/idea statis
+→ Unknown command: /idea statis
+  Did you mean: /idea status?
+
+/idea runing
+→ Unknown command: /idea runing
+  Did you mean: /idea running?
+```
+
+Common typos are automatically corrected, and similar commands are suggested using edit distance.
 
 ## Why pi-idea?
 
