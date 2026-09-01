@@ -1,5 +1,5 @@
-import { execSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { execFileSync, execSync, spawn } from "node:child_process";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -44,11 +44,14 @@ type GlobalConfig = {
   cfToken?: string;
   /** Cloudflare zone ID for the domain. If unset, resolved from the API. */
   cfZoneId?: string;
+  /** Optional absolute path to cloudflared. */
+  cloudflaredPath?: string;
 };
 
 const STATE_TYPE = "pi-idea-state";
 const CF_TOKEN_ENV = "PI_IDEA_CF_TOKEN";
 const CF_ZONE_ENV = "PI_IDEA_CF_ZONE_ID";
+const CLOUDFLARED_PATH_ENV = "PI_IDEA_CLOUDFLARED_PATH";
 const GLOBAL_CONFIG_PATH = join(homedir(), ".config", "pi-idea.json");
 const IDEAS_ROOT = (() => {
   const env = process.env.PI_IDEA_ROOT;
@@ -71,7 +74,7 @@ const STOPWORDS = new Set([
 
 const VALID_SUBCOMMANDS = [
   "new", "create", "use", "run", "status", "show", "go", "stop",
-  "ps", "running", "restart", "domain", "token", "clear", "help",
+  "ps", "running", "restart", "doctor", "domain", "token", "clear", "help",
 ];
 
 /** Common typos mapped to correct subcommands */
@@ -98,7 +101,6 @@ const SUBCOMMAND_CORRECTIONS: Record<string, string> = {
   "attatch": "use",
   "atach": "use",
   "attch": "use",
-  "atach": "use",
   "new": "new",
   "nw": "new",
   "ne": "new",
@@ -284,7 +286,7 @@ ${featureLines}
 - **PID files, not pkill**: To stop/restart servers, write the PID to a file (\`.server.pid\`, \`.tunnel.pid\`) and kill by that PID. Never use \`pkill -f\` with a pattern — it matches any process whose command line contains the string (e.g., \`pkill -f \"node server/index.js\"\` will kill ANY Node.js process with \"server\" in its path, including unrelated gateways). Kill by PID file is precise and safe.
 - Each script updates \`runtime.json\` directly (port, localUrl, publicUrl, preferredUrl).
 - Do not serve on localhost alone. Always use cloudflared tunnel for sharing.
-- If \`cloudflared\` is unavailable, stop and ask the user to install it rather than defaulting to localhost.
+- Discover \`cloudflared\` via PATH, \`$PI_IDEA_CLOUDFLARED_PATH\`, and \`~/.local/bin/cloudflared\`. Only ask the user to install it if none are executable.
 - For interactive web apps that use WebSockets (Socket.IO, WS, etc.), cloudflared\'s default QUIC protocol drops the \`Upgrade: websocket\` header, causing \`400 Bad Request\` on connection. **Always add \`--protocol http2\` to the cloudflared command** in \`scripts/tunnel.sh\`.
 - Verify that the preview works without manual refreshes; avoid stale asset caching during preview and account for shared tunnel preview limitations or transport quirks.
 
@@ -299,7 +301,7 @@ When a domain and Cloudflare API token are configured, set up a **named Cloudfla
 
 1. **Generate a tunnel secret**: \`openssl rand -base64 32\` (or use node crypto).
 2. **Create the tunnel via Cloudflare API**: \`curl -s -X POST \"https://api.cloudflare.com/client/v4/accounts/\$ACCOUNT_ID/cfd_tunnel\" …\` with the name matching the idea name (\`${meta.name}\`).
-3. **Save the credentials** in \`~/.cloudflared/${meta.name}-credentials.json\`.
+3. **Save the tunnel token** in \`~/.cloudflared/${meta.name}-token.json\` with owner-only permissions.
 4. **Create a DNS CNAME record** for \`${meta.name}.${domain}\` pointing to \`<tunnel-id>.cfargotunnel.com\` (proxied).
 5. **Create a cloudflared config** at \`~/.cloudflared/config.yml\` with ingress rules for the subdomain.
 6. **Start the tunnel using the token**: \`cloudflared tunnel --config ~/.cloudflared/config.yml run --token "\$(cat ~/.cloudflared/${meta.name}-token.json | node -e 'process.stdin.resume();let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).token))')\`.
@@ -410,10 +412,9 @@ function runScript(idea: IdeaState, name: string, timeout = SCRIPT_TIMEOUT): { o
   }
 }
 
-/** Try to detect a running server by checking common PID files and ports. */
+/** Detect the idea's server PID. Tunnel PID files must never count as a server. */
 function detectRuntime(idea: IdeaState): { port?: number; pid?: number } {
-  // Check common PID files
-  for (const pidFile of [".server.pid", "server.pid", ".tunnel.pid", "tunnel.pid"]) {
+  for (const pidFile of [".server.pid", "server.pid"]) {
     const candidate = join(idea.root, pidFile);
     try {
       const pid = parseInt(readFileSync(candidate, "utf8").trim(), 10);
@@ -426,17 +427,18 @@ function detectRuntime(idea: IdeaState): { port?: number; pid?: number } {
   return {};
 }
 
-/** Try to find which port a server is listening on by scanning common ones. */
+/** Verify only the port recorded by this idea; scanning common ports can
+ * accidentally select an unrelated application's server. */
 function detectServerPort(idea: IdeaState): number | undefined {
   const runtime = readRuntime(idea);
-  const candidates = runtime.port ? [runtime.port].flat() : [3000, 3001, 4173, 5173, 8080, 8000];
-  for (const port of [candidates].flat()) {
-    try {
-      execSync(`curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://127.0.0.1:${port}`, { encoding: "utf8" });
-      return Number(port);
-    } catch {}
-  }
-  return undefined;
+  const port = Number(runtime.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return undefined;
+  const server = detectRuntime(idea);
+  if (!server.pid) return undefined;
+  try {
+    execFileSync("curl", ["-fsS", "--max-time", "2", `http://127.0.0.1:${port}`], { stdio: "ignore" });
+    return port;
+  } catch { return undefined; }
 }
 
 /** Try alternative names for a script file. */
@@ -454,6 +456,7 @@ function extractTunnelUrl(text: string): string | undefined {
 }
 
 const CF_API = "https://api.cloudflare.com/client/v4";
+let lastTunnelSetupError = "";
 
 /** Make a Cloudflare API request. Returns the parsed JSON response result or throws. */
 async function cfApi(cfToken: string, method: string, path: string, body?: unknown): Promise<any> {
@@ -485,13 +488,14 @@ async function cfApi(cfToken: string, method: string, path: string, body?: unkno
  * Returns the tunnel URL or null on failure.
  */
 async function setupNamedTunnel(idea: IdeaState, port?: number): Promise<string | null> {
+  lastTunnelSetupError = "";
   const globalCfg = readGlobalConfig();
   const domain = globalCfg.domain;
   const cfToken = globalCfg.cfToken || process.env[CF_TOKEN_ENV] || "";
   if (!domain || !cfToken) return null;
 
   const tunnelName = idea.name;
-  const resolvedPort = port || readRuntime(idea).port || 3000;
+  const resolvedPort = Number(port || readRuntime(idea).port || 3000);
   const tunnelUrl = `https://${tunnelName}.${domain}`;
 
   try {
@@ -507,15 +511,14 @@ async function setupNamedTunnel(idea: IdeaState, port?: number): Promise<string 
       }
     }
 
-    // 2. Resolve the account ID
-    const accounts = await cfApi(cfToken, "GET", "/accounts");
-    if (!Array.isArray(accounts) || accounts.length === 0) {
-      throw new Error("No Cloudflare account found");
-    }
-    const accountId = accounts[0].id;
+    // 2. Resolve the account from the configured zone. Choosing the first
+    // account is unsafe when a token has access to multiple accounts.
+    const zone = await cfApi(cfToken, "GET", `/zones/${zoneId}`);
+    const accountId = zone?.account?.id;
+    if (!accountId) throw new Error(`Could not resolve the account for zone ${zoneId}`);
 
-    // 3. Check if a tunnel with this name already exists
-    const tunnels: any[] = await cfApi(cfToken, "GET", `/accounts/${accountId}/cfd_tunnel`);
+    // 3. Check for a non-deleted tunnel with this exact name.
+    const tunnels: any[] = await cfApi(cfToken, "GET", `/accounts/${accountId}/cfd_tunnel?name=${encodeURIComponent(tunnelName)}&is_deleted=false`);
     let tunnelId: string;
     const existingTunnel = Array.isArray(tunnels) ? tunnels.find((t: any) => t.name === tunnelName) : undefined;
 
@@ -538,17 +541,20 @@ async function setupNamedTunnel(idea: IdeaState, port?: number): Promise<string 
     const cfDir = dirname(tokenPath);
     if (!existsSync(cfDir)) mkdirSync(cfDir, { recursive: true });
     writeJson(tokenPath, { token: tokenStr, id: tunnelId, name: tunnelName });
+    chmodSync(tokenPath, 0o600);
 
-    // 6. Create DNS CNAME record if not already set
-    const dnsRecords: any[] = await cfApi(cfToken, "GET", `/zones/${zoneId}/dns_records?type=CNAME&name=${tunnelName}.${domain}`);
-    if (!Array.isArray(dnsRecords) || dnsRecords.length === 0) {
-      await cfApi(cfToken, "POST", `/zones/${zoneId}/dns_records`, {
-        type: "CNAME",
-        name: tunnelName,
-        content: `${tunnelId}.cfargotunnel.com`,
-        proxied: true,
-        ttl: 60,
-      });
+    // 6. Create or repair the DNS record. A stale record must not be treated
+    // as success merely because a record with the same name exists.
+    const hostname = `${tunnelName}.${domain}`;
+    const desiredDns = { type: "CNAME", name: hostname, content: `${tunnelId}.cfargotunnel.com`, proxied: true, ttl: 1 };
+    const dnsRecords: any[] = await cfApi(cfToken, "GET", `/zones/${zoneId}/dns_records?name=${encodeURIComponent(hostname)}`);
+    if (Array.isArray(dnsRecords) && dnsRecords.length > 0) {
+      const record = dnsRecords[0];
+      if (record.type !== desiredDns.type || record.content !== desiredDns.content || !record.proxied) {
+        await cfApi(cfToken, "PUT", `/zones/${zoneId}/dns_records/${record.id}`, desiredDns);
+      }
+    } else {
+      await cfApi(cfToken, "POST", `/zones/${zoneId}/dns_records`, desiredDns);
     }
 
     // 7. Write/update shared cloudflared config.yml (ingress rules only, no top-level tunnel:)
@@ -576,12 +582,20 @@ async function setupNamedTunnel(idea: IdeaState, port?: number): Promise<string 
     }
     writeFileSync(configPath, configLines.join("\n") + "\n", "utf8");
 
-    // 8. Start the tunnel process (it was only configured, not running)
-    startTunnelProcess(idea, tokenStr, configPath);
+    // 8. Start the tunnel and verify the public origin before reporting it.
+    const cloudflared = resolveCloudflaredBinary(globalCfg);
+    if (!cloudflared) throw new Error("cloudflared was not found in PATH, ~/.local/bin, or configured path");
+    if (!startTunnelProcess(idea, tokenStr, configPath, cloudflared)) {
+      throw new Error("cloudflared did not register a tunnel connection");
+    }
+    if (!await verifyPublicUrl(tunnelUrl)) {
+      throw new Error(`Public health check failed for ${tunnelUrl}`);
+    }
 
     return tunnelUrl;
   } catch (err) {
-    console.error("setupNamedTunnel failed:", String(err));
+    lastTunnelSetupError = err instanceof Error ? err.message : String(err);
+    console.error("setupNamedTunnel failed:", lastTunnelSetupError);
     return null;
   }
 }
@@ -591,123 +605,100 @@ async function setupNamedTunnel(idea: IdeaState, port?: number): Promise<string 
  * while preserving all other hostnames. This avoids YAML duplicate-key issues.
  * Each hostname block is a clean 2-line entry (hostname + single service).
  */
-function rebuildConfigYaml(
+export function rebuildConfigYaml(
   existing: string,
   tunnelName: string,
   domain: string,
   port: number,
 ): string[] {
+  // Normalize the small ingress-only config rather than mutating YAML by
+  // indentation-sensitive string positions. Preserve valid hostname/service
+  // pairs and emit exactly one catch-all as the final rule.
+  const rules = new Map<string, string>();
   const lines = existing.split("\n");
-  const result: string[] = [];
-  const targetHostname = `${tunnelName}.${domain}`;
-  let inIngress = false;
-  let currentHostname: string | null = null;
-  let hostnameSeen = false;
-  let afterHostname = false; // waiting for service line
-
-  for (const line of lines) {
-    const trimmed = line.trimEnd();
-
-    // Track ingress section
-    if (trimmed.startsWith("ingress:")) {
-      inIngress = true;
-      result.push(trimmed);
-      continue;
-    }
-
-    if (!inIngress) {
-      // Skip top-level tunnel:/credentials-file: (we use tokens)
-      if (trimmed.startsWith("tunnel:") || trimmed.startsWith("credentials-file:")) continue;
-      result.push(trimmed);
-      continue;
-    }
-
-    // Inside ingress section — we need to parse hostname/service blocks
-    const hostnameMatch = trimmed.match(/^-\s+hostname:\s+(\S+)/);
-    const serviceMatch = trimmed.match(/^\s+service:/);
-    const is404 = trimmed.includes("http_status:404");
-
-    if (hostnameMatch) {
-      // Finish previous block
-      if (currentHostname && currentHostname === targetHostname) {
-        hostnameSeen = true;
-        // Skip — we'll add the new one later
-        currentHostname = null;
-        afterHostname = false;
-        continue;
-      }
-      // Emit previous preserved hostname if it had a service
-      if (currentHostname && !afterHostname) {
-        result.push(`  - hostname: ${currentHostname}`);
-      }
-      currentHostname = hostnameMatch[1];
-      afterHostname = true;
-      // Skip the hostname line for now (emit when we see service)
-      continue;
-    }
-
-    if (serviceMatch && currentHostname) {
-      if (currentHostname === targetHostname) {
-        hostnameSeen = true;
-        // Skip this entire block (both lines)
-        currentHostname = null;
-        afterHostname = false;
-        continue;
-      }
-      // Emit the preserved hostname + this service
-      result.push(`  - hostname: ${currentHostname}`);
-      result.push(trimmed);
-      currentHostname = null;
-      afterHostname = false;
-      continue;
-    }
-
-    if (is404) {
-      result.push(trimmed);
-      continue;
-    }
-
-    // Unexpected ingress line — pass through
-    if (currentHostname && !afterHostname) {
-      result.push(`  - hostname: ${currentHostname}`);
-      currentHostname = null;
-    }
-    result.push(trimmed);
+  for (let i = 0; i < lines.length; i++) {
+    const hostname = lines[i].trim().match(/^-\s+hostname:\s+(\S+)$/)?.[1];
+    if (!hostname) continue;
+    const service = lines[i + 1]?.trim().match(/^service:\s+(.+)$/)?.[1];
+    if (service) rules.set(hostname, service);
   }
+  rules.set(`${tunnelName}.${domain}`, `http://localhost:${port}`);
+  return [
+    "# Cloudflare tunnel ingress rules for pi-idea previews.",
+    "ingress:",
+    ...[...rules].flatMap(([hostname, service]) => [
+      `  - hostname: ${hostname}`,
+      `    service: ${service}`,
+    ]),
+    "  - service: http_status:404",
+  ];
+}
 
-  // Flush any dangling hostname
-  if (currentHostname && currentHostname !== targetHostname && !afterHostname) {
-    result.push(`  - hostname: ${currentHostname}`);
-  }
+export function resolveCloudflaredBinary(config: GlobalConfig = readGlobalConfig()): string | null {
+  const configured = process.env[CLOUDFLARED_PATH_ENV] || config.cloudflaredPath;
+  const candidates = [configured, join(homedir(), ".local", "bin", "cloudflared"), "/usr/local/bin/cloudflared", "/usr/bin/cloudflared"];
+  try { candidates.unshift(execFileSync("which", ["cloudflared"], { encoding: "utf8", timeout: 3_000 }).trim()); } catch {}
+  return candidates.find((candidate): candidate is string => Boolean(candidate && existsSync(candidate))) || null;
+}
 
-  // Insert the target hostname rule right before the 404 catch-all
-  if (!hostnameSeen) {
-    const newRule = [`  - hostname: ${targetHostname}`, `    service: http://localhost:${port}`];
-    const insertIdx = result.findIndex(l => l.includes("http_status:404"));
-    if (insertIdx >= 0) {
-      result.splice(insertIdx, 0, ...newRule);
-    } else {
-      result.push(...newRule);
+async function checkPublicDns(hostname: string): Promise<boolean> {
+  const endpoints = [
+    `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=A`,
+    `https://dns.google/resolve?name=${encodeURIComponent(hostname)}&type=A`,
+  ];
+  const results = await Promise.all(endpoints.map(async endpoint => {
+    try {
+      const response = await fetch(endpoint, { signal: AbortSignal.timeout(5_000), headers: { Accept: "application/dns-json" } });
+      const data = await response.json() as { Status?: number; Answer?: unknown[] };
+      return response.ok && data.Status === 0 && Boolean(data.Answer?.length);
+    } catch { return false; }
+  }));
+  return results.every(Boolean);
+}
+
+type PublicProbe = { ok: boolean; detail: string };
+async function probePublicUrl(url: string): Promise<PublicProbe> {
+  try {
+    const separator = url.includes("?") ? "&" : "?";
+    const response = await fetch(`${url}${separator}piIdeaHealth=${Date.now()}`, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(7_000),
+      headers: { "Cache-Control": "no-cache" },
+    });
+    if (!response.ok) return { ok: false, detail: `HTTP ${response.status}` };
+    const type = response.headers.get("content-type") || "";
+    const body = await response.text();
+    if (!type.includes("text/html") || !/<html|<!doctype/i.test(body)) return { ok: false, detail: "response is not HTML" };
+    const assets = [...body.matchAll(/(?:src|href)=["']([^"']+\.(?:js|css)(?:\?[^"']*)?)["']/gi)]
+      .map(match => new URL(match[1], url).toString()).slice(0, 10);
+    for (const asset of assets) {
+      const assetResponse = await fetch(asset, { signal: AbortSignal.timeout(7_000), headers: { "Cache-Control": "no-cache" } });
+      if (!assetResponse.ok) return { ok: false, detail: `asset failed: ${assetResponse.status} ${asset}` };
+      await assetResponse.body?.cancel();
     }
-  } else {
-    // Add the rule since it was removed (we skipped it above)
-    const newRule = [`  - hostname: ${targetHostname}`, `    service: http://localhost:${port}`];
-    const insertIdx = result.findIndex(l => l.includes("http_status:404"));
-    if (insertIdx >= 0) {
-      result.splice(insertIdx, 0, ...newRule);
-    } else {
-      result.push(...newRule);
-    }
+    return { ok: true, detail: `HTTP ${response.status}; ${assets.length} asset${assets.length === 1 ? "" : "s"} verified` };
+  } catch (err) {
+    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
   }
+}
 
-  return result;
+async function verifyPublicUrl(url: string): Promise<boolean> {
+  const hostname = new URL(url).hostname;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    if (await checkPublicDns(hostname)) {
+      const probe = await probePublicUrl(url);
+      if (probe.ok) return true;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1_000));
+  }
+  return false;
 }
 
 /**
  * Start cloudflared as a background process using the tunnel token.
  * Uses PID file for lifecycle management.
  */
-function startTunnelProcess(idea: IdeaState, token: string, configPath: string): boolean {
+function startTunnelProcess(idea: IdeaState, token: string, configPath: string, cloudflared: string): boolean {
   const logPath = join(idea.root, "tunnel.log");
   const pidPath = join(idea.root, ".tunnel.pid");
 
@@ -723,17 +714,19 @@ function startTunnelProcess(idea: IdeaState, token: string, configPath: string):
   } catch {}
 
   try {
-    // Use spawn with detached:true — avoids shell injection, shell dependency,
-    // and fragile nohup+&+echo patterns. The child process survives the parent's exit.
-    const child = spawn("cloudflared", [
-      "tunnel", "--config", configPath, "run", "--token", token
+    // Clear stale registration messages so readiness belongs to this process.
+    writeFileSync(logPath, "", "utf8");
+    const logFd = openSync(logPath, "a");
+    const child = spawn(cloudflared, [
+      "tunnel", "--protocol", "http2", "--config", configPath, "run", "--token", token
     ], {
       detached: true,
-      stdio: ["ignore", fs.openSync(logPath, "a"), fs.openSync(logPath, "a")],
+      stdio: ["ignore", logFd, logFd],
     });
     child.unref();
+    closeSync(logFd);
     const pid = child.pid;
-    if (pid > 0) {
+    if (pid !== undefined && pid > 0) {
       writeFileSync(pidPath, String(pid), "utf8");
       // Wait up to 30s for tunnel to register (poll log file)
       for (let i = 0; i < 30; i++) {
@@ -789,16 +782,42 @@ function readRuntime(state: IdeaState) {
   return readJson<RuntimeState>(state.runtimePath, { running: false });
 }
 
+export function patchRequirementsStatus(state: IdeaState, status: MetaState["status"]) {
+  if (!existsSync(state.requirementsPath)) return;
+  const current = readFileSync(state.requirementsPath, "utf8");
+  const next = /^Status:\s*\*\*[^\n]+\*\*/m.test(current)
+    ? current.replace(/^Status:\s*\*\*[^\n]+\*\*/m, `Status: **${status}**`)
+    : current;
+  if (next !== current) writeFileSync(state.requirementsPath, next, "utf8");
+}
+
+export function patchRequirementsRuntime(state: IdeaState, runtime: RuntimeState) {
+  if (!existsSync(state.requirementsPath)) return;
+  const preferred = runtime.preferredUrl || runtime.publicUrl || runtime.url || runtime.localUrl;
+  const values: Record<string, string> = {
+    "Preferred preview URL": preferred ? String(preferred) : "not running",
+    "Public URL": runtime.publicUrl ? String(runtime.publicUrl) : "not running",
+    "Local URL": runtime.localUrl || runtime.url ? String(runtime.localUrl || runtime.url) : "not running",
+    "Port": runtime.port ? String(runtime.port) : "not running",
+  };
+  let content = readFileSync(state.requirementsPath, "utf8");
+  for (const [label, value] of Object.entries(values)) {
+    const pattern = new RegExp(`^- ${label}:.*$`, "m");
+    if (pattern.test(content)) content = content.replace(pattern, `- ${label}: ${value}`);
+  }
+  writeFileSync(state.requirementsPath, content, "utf8");
+}
+
 function saveMeta(state: IdeaState, patch: Partial<MetaState>) {
   const meta = { ...readMeta(state), ...patch, updatedAt: nowIso() };
   writeJson(state.metaPath, meta);
-  writeFileSync(state.requirementsPath, requirementsFor(meta, readRuntime(state)), "utf8");
+  if (patch.status) patchRequirementsStatus(state, patch.status);
 }
 
 function saveRuntime(state: IdeaState, patch: Partial<RuntimeState>) {
   const runtime = { ...readRuntime(state), ...patch, updatedAt: nowIso() };
   writeJson(state.runtimePath, runtime);
-  writeFileSync(state.requirementsPath, requirementsFor(readMeta(state), runtime), "utf8");
+  patchRequirementsRuntime(state, runtime);
 }
 
 function renderStatus(state: IdeaState) {
@@ -870,7 +889,7 @@ function goPrompt(idea: IdeaState) {
     "**SIGHUP hardening is mandatory** — all background server processes MUST use `nohup` + `disown` so they survive the calling shell exit. Without this, processes die silently as soon as the agent's shell returns.",
     "Include `scripts/restart-server.sh` — it restarts only the Node server without touching cloudflared, so the tunnel URL stays the same across restarts.",
     "For web apps, do not serve on localhost alone. After implementing the server, create a tunnel with cloudflared, record the public URL as the primary preview URL, and surface only the tunnel URL to the user. The local URL is a fallback for debugging only.",
-    "If cloudflared is not available, stop and ask the user to install it rather than defaulting to a localhost-only preview.",
+    "Discover cloudflared via PATH, $PI_IDEA_CLOUDFLARED_PATH, and ~/.local/bin/cloudflared. Only ask the user to install it if none are executable.",
     "For web apps that use WebSockets (Socket.IO, WS, etc.): cloudflared's default QUIC protocol drops the `Upgrade: websocket` header. The tunnel script MUST add `--protocol http2` to the cloudflared command.",
     "Validate the primary flows through the shared tunnel URL itself. Do not leave the preview in a state where users need manual refreshes after actions; fix caching, transport, or realtime update issues as part of the implementation.",
     "When you finish, summarize what changed and include the tunnel URL.",
@@ -921,7 +940,7 @@ Behavior rules:
 - **PID files, not pkill**: Write server/tunnel PIDs to files (e.g. \`.server.pid\`, \`.tunnel.pid\`). Kill by PID, never by \`pkill -f\` pattern — that kills any process whose command line happens to contain the search string (unrelated gateways, other Node servers).
 - **Tunnel URL volatility**: trycloudflare.com quick tunnels change URL on every start. To keep the same URL across restarts, use \`scripts/restart-server.sh\` (leaves cloudflared running).
 - For web apps, use a tunnel — do not serve on localhost alone. After implementing, start cloudflared and record the public tunnel URL as the primary preview URL. The local URL is a fallback for debugging only.
-- If cloudflared is unavailable, stop and ask the user to install it rather than defaulting to a localhost-only preview.
+- Discover cloudflared via PATH, \`$PI_IDEA_CLOUDFLARED_PATH\`, and \`~/.local/bin/cloudflared\`. Only ask the user to install it if none are executable.
 - Whenever you start, stop, or change a preview runtime, update runtime.json with public URL as preferredPreviewUrl and local URL as a fallback.
 - For interactive web apps that use WebSockets (Socket.IO, WS, etc.), cloudflared\'s default QUIC protocol drops the \`Upgrade: websocket\` header, causing \`400 Bad Request\`. The tunnel script MUST use \`--protocol http2\`.
 - Ensure the shared preview behaves correctly without manual refreshes; watch for stale cached assets and tunnel-specific transport or realtime quirks through the shared URL.
@@ -951,6 +970,7 @@ function helpText(): string {
     "  /idea use <name>       Attach to an existing idea workspace",
     "  /idea run [name]           Start the preview for an existing idea",
     "  /idea status [name]        Show status of active idea or a named one",
+    "  /idea doctor [name]        Diagnose server, DNS, tunnel, and public assets",
     "  /idea ps | running     List all running ideas with URLs",
     "  /idea go               Start implementing the active idea",
     "  /idea restart          Restart server only (keeps tunnel URL)",
@@ -1033,6 +1053,11 @@ Use /idea (with no args) to list available ideas.`,
 Show the current state of an idea, including its path,
 status, and any running preview URLs.
 Omit name to show the active idea.`,
+    "doctor": `Usage: /idea doctor [name]
+
+Diagnose an idea's preview without changing it. Checks the server PID and
+local URL, cloudflared installation and tunnel PID, public DNS through
+Cloudflare and Google, and the public HTML plus referenced JS/CSS assets.`,
     "run": `Usage: /idea run [name]
 
 Start the preview for an idea that is already implemented.
@@ -1144,6 +1169,44 @@ export default function ideaExtension(pi: ExtensionAPI) {
         return;
       }
 
+      if (subcommand === "doctor") {
+        const target = rest ? findIdea(rest) : activeIdea;
+        if (!target) {
+          ctx.ui.notify("No matching active idea", "warning");
+          return;
+        }
+        const runtime = readRuntime(target);
+        const config = readGlobalConfig();
+        const cloudflared = resolveCloudflaredBinary(config);
+        const server = detectRuntime(target);
+        const port = detectServerPort(target);
+        let tunnelAlive = false;
+        try {
+          const pid = Number(readFileSync(join(target.root, ".tunnel.pid"), "utf8"));
+          process.kill(pid, 0);
+          tunnelAlive = true;
+        } catch {}
+        const publicUrl = String(runtime.publicUrl || runtime.preferredUrl || "");
+        let dnsOk = false;
+        let publicProbe: PublicProbe = { ok: false, detail: "no public URL recorded" };
+        if (publicUrl) {
+          try { dnsOk = await checkPublicDns(new URL(publicUrl).hostname); } catch {}
+          publicProbe = await probePublicUrl(publicUrl);
+        }
+        const mark = (ok: boolean) => ok ? "✓" : "✗";
+        const lines = [
+          `Preview diagnostics: ${target.name}`,
+          `${mark(Boolean(server.pid))} Server PID${server.pid ? ` ${server.pid}` : " not running"}`,
+          `${mark(Boolean(port))} Local origin${port ? ` http://127.0.0.1:${port}` : " unavailable"}`,
+          `${mark(Boolean(cloudflared))} cloudflared${cloudflared ? ` at ${cloudflared}` : " not found"}`,
+          `${mark(tunnelAlive)} Tunnel process${tunnelAlive ? " running" : " not running"}`,
+          `${mark(dnsOk)} Public DNS${publicUrl ? ` for ${new URL(publicUrl).hostname}` : " unavailable"}`,
+          `${mark(publicProbe.ok)} Public app: ${publicProbe.detail}`,
+        ];
+        ctx.ui.notify(lines.join("\n"), publicProbe.ok ? "info" : "warning");
+        return;
+      }
+
       if (subcommand === "clear") {
         if (!activeIdea) {
           ctx.ui.notify("No active idea to clear", "info");
@@ -1205,8 +1268,6 @@ export default function ideaExtension(pi: ExtensionAPI) {
           ctx.ui.notify(`${runScriptName} failed:\n${result.stderr || result.stdout}`, "error");
           return;
         }
-        saveMeta(activeIdea, { status: "running" });
-
         // Detect actual runtime state (handles older ideas that don't update runtime.json)
         const detectedPort = detectServerPort(activeIdea);
         const pidInfo = detectRuntime(activeIdea);
@@ -1230,13 +1291,16 @@ export default function ideaExtension(pi: ExtensionAPI) {
         let tunnelUrl: string | undefined;
         if (hasDomain) {
           ctx.ui.notify(`Setting up named tunnel for ${activeIdea.name}.${globalCfg.domain}...`, "info");
-          tunnelUrl = await setupNamedTunnel(activeIdea, detectedPort || Number(readRuntime(activeIdea).port) || undefined);
-          if (!tunnelUrl) {
-            ctx.ui.notify("Named tunnel setup failed, falling back to quick tunnel", "warning");
+          const namedUrl = await setupNamedTunnel(activeIdea, detectedPort || Number(readRuntime(activeIdea).port) || undefined);
+          if (!namedUrl) {
+            saveRuntime(activeIdea, { publicUrl: undefined, preferredUrl: undefined });
+            ctx.ui.notify(`Named tunnel setup failed: ${lastTunnelSetupError || "unknown error"}\nNo quick-tunnel fallback was started.`, "error");
+            return;
           }
+          tunnelUrl = namedUrl;
         }
 
-        if (!tunnelUrl) {
+        if (!hasDomain && !tunnelUrl) {
           // Try multiple tunnel script names (quick tunnel fallback)
           const tunnelScript = findScript(activeIdea, "tunnel.sh", "tunnel-run.sh", "tunnel_start.sh");
           if (tunnelScript) {
@@ -1270,6 +1334,7 @@ export default function ideaExtension(pi: ExtensionAPI) {
             tunnelPid: tunnelPid || undefined,
           });
         }
+        saveMeta(activeIdea, { status: "running" });
         ctx.ui.notify(`${activeIdea.name} running at ${previewUrl}`, "info");
         return;
       }
