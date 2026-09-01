@@ -34,6 +34,7 @@ You:  Share the URL with anyone
 | `/idea` | Show current active idea or list existing ideas |
 | `/idea use <name>` | Attach to an existing idea workspace |
 | `/idea status` | Show active idea status & preview URLs |
+| `/idea doctor [name]` | Diagnose server, tunnel, public DNS, HTML, and assets |
 | `/idea run [name]` | Start the preview (server + tunnel) for an existing idea |
 | `/idea ps` / `running` | List all running ideas with their URLs and ports |
 | `/idea go` | Tell Pi to implement and run the active idea |
@@ -92,12 +93,15 @@ After setting these, run `/idea go` on any idea — Pi will set up a **named Clo
 - Stable URL at `https://<idea-name>.<domain>` (e.g. `https://my-app.1clickdev.com`)
 - Cloudflared config at `~/.cloudflared/config.yml`
 - DNS CNAME record created automatically
-- Tunnel credentials saved to `~/.cloudflared/<idea-name>-credentials.json`
+- Tunnel token saved to `~/.cloudflared/<idea-name>-token.json`
 - **URL persists across restarts** — use `scripts/restart-server.sh` to redeploy
 
-The token and zone ID can also be set via environment variables:
+The token, zone ID, and cloudflared binary can also be set via environment variables:
 - `PI_IDEA_CF_TOKEN` — Cloudflare API token
 - `PI_IDEA_CF_ZONE_ID` — Cloudflare zone ID (optional, resolved automatically)
+- `PI_IDEA_CLOUDFLARED_PATH` — absolute binary path (optional; discovery also checks `PATH` and `~/.local/bin/cloudflared`)
+
+Pi-idea reports a named preview URL only after cloudflared registers, the hostname resolves through both Cloudflare and Google DNS, and the public HTML plus referenced JavaScript/CSS assets pass uncached health checks. Existing DNS records are repaired when they point at an outdated tunnel. If named-tunnel setup fails, pi-idea reports the failure rather than silently switching to a volatile quick-tunnel URL.
 
 ### Required token permissions
 - Cloudflare Tunnel: Edit
@@ -127,8 +131,8 @@ Defaults to `~/dev/ideas/` when unset.
   scripts/           — run.sh, stop.sh, tunnel-run.sh
 ```
 
-Pi keeps `runtime.json` up to date so you always know where the app is — local URL, public tunnel URL, and which one is preferred.
+Pi keeps `runtime.json` up to date so you always know where the app is — local URL, public tunnel URL, and which one is preferred. Runtime and status updates patch only their corresponding lines in `requirements.md`; they do not regenerate or overwrite the refined product specification.
 
-When a custom domain is configured, Cloudflare tunnel credentials are stored in `~/.cloudflared/`:
-- `~/.cloudflared/<idea-name>-credentials.json` — tunnel secret
+When a custom domain is configured, Cloudflare tunnel access is stored in `~/.cloudflared/`:
+- `~/.cloudflared/<idea-name>-token.json` — tunnel token with owner-only permissions
 - `~/.cloudflared/config.yml` — ingress rules for all named tunnels

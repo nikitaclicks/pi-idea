@@ -2,6 +2,11 @@
   "name": "pi-idea",
   "version": "0.3.0",
   "private": false,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test extensions/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
   "description": "Turn a single-shot idea into a live, internet-accessible prototype — /idea, clarify, go, done.",
   "keywords": [
     "pi-package"
