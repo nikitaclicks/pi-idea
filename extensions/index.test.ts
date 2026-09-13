@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { patchRequirementsRuntime, patchRequirementsStatus, rebuildConfigYaml, resolveCloudflaredBinary } from "./index.ts";
+import { decideGuardAction } from "./guard.ts";
 
 test("rebuildConfigYaml preserves existing rules and updates one target", () => {
   const input = `# existing\ningress:\n  - hostname: one.example.com\n    service: http://localhost:3000\n  - hostname: target.example.com\n    service: http://localhost:9999\n  - service: http_status:404\n`;
@@ -29,4 +30,17 @@ test("runtime and status patches preserve refined requirements", () => {
 
 test("cloudflared resolver honors configured absolute path", () => {
   assert.equal(resolveCloudflaredBinary({ cloudflaredPath:"/bin/true" }), "/bin/true");
+});
+
+test("guard heals only what is broken", () => {
+  // Not desired → never touch
+  assert.equal(decideGuardAction({ desired:false, serverAlive:false, tunnelUnit:"active", publicOk:null }), "none");
+  // Desired + server dead → restart server (regardless of tunnel)
+  assert.equal(decideGuardAction({ desired:true, serverAlive:false, tunnelUnit:"inactive", publicOk:null }), "restart-server");
+  // Server alive + public failing → heal tunnel
+  assert.equal(decideGuardAction({ desired:true, serverAlive:true, tunnelUnit:"active", publicOk:false }), "heal-tunnel");
+  // Everything healthy → none
+  assert.equal(decideGuardAction({ desired:true, serverAlive:true, tunnelUnit:"active", publicOk:true }), "none");
+  // Public failing but server dead → server first (tunnel may be fine)
+  assert.equal(decideGuardAction({ desired:true, serverAlive:false, tunnelUnit:"active", publicOk:false }), "restart-server");
 });

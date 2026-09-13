@@ -136,3 +136,21 @@ Pi keeps `runtime.json` up to date so you always know where the app is — local
 When a custom domain is configured, Cloudflare tunnel access is stored in `~/.cloudflared/`:
 - `~/.cloudflared/<idea-name>-token.json` — tunnel token with owner-only permissions
 - `~/.cloudflared/config.yml` — ingress rules for all named tunnels
+## Guard — single supervisor for all ideas
+
+Running previews are watched by one systemd user unit (`pi-idea-guard.service`). It reads the same state files `/idea ps` reads (`runtime.json`, PID files, local origin probe) and heals only what is broken:
+
+| Symptom | Action |
+|---|---|
+| runtime says running, server dead/hung | run `scripts/restart-server.sh` (fallback `run.sh`); update port + ingress if the port changed |
+| server alive, public URL failing (5xx) | restart the idea's `cloudflared-idea@<name>` tunnel unit (or migrate legacy PID-file tunnels onto it) |
+| runtime says stopped | never touched |
+
+Heals are rate-limited per idea (default 10 min cooldown, tunable via `PI_IDEA_GUARD_COOLDOWN`, `PI_IDEA_GUARD_INTERVAL`, `PI_IDEA_GUARD_PROBE_INTERVAL`) to prevent flapping. Tunnels additionally run under their own per-idea units (`cloudflared-idea@<name>`) with `--no-autoupdate` (a cloudflared self-update must never kill a tunnel) and `Restart=always`, so crashes recover in ~5s without the guard.
+
+```bash
+/idea guard        # status
+/idea guard on     # install + enable (also auto-enabled by /idea run)
+/idea guard off    # disable; /idea run will respect this
+journalctl --user -u pi-idea-guard -f
+```
