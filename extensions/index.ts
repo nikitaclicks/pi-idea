@@ -279,7 +279,7 @@ ${featureLines}
 - Create the standard scripts:
   \`scripts/run.sh\` — start server in background, write {localUrl, port} to runtime.json
   \`scripts/stop.sh\` — kill server + tunnel, write {running: false} to runtime.json
-  \`scripts/tunnel.sh\` — start cloudflared, write {publicUrl, preferredUrl} to runtime.json
+  \`scripts/tunnel.sh\` — ensure the tunnel is running via its systemd unit, write {publicUrl, preferredUrl} to runtime.json
   \`scripts/status.sh\` — output JSON {running, localUrl, publicUrl, port} to stdout
   \`scripts/restart-server.sh\` — restart ONLY the server, keep tunnel alive (same URL!)
 - **SIGHUP hardening**: All background processes MUST use \`nohup\` + \`disown\` so they survive the calling shell exit. Without this, servers die silently when the parent shell finishes.
@@ -287,6 +287,10 @@ ${featureLines}
 - Each script updates \`runtime.json\` directly (port, localUrl, publicUrl, preferredUrl).
 - Do not serve on localhost alone. Always use cloudflared tunnel for sharing.
 - Discover \`cloudflared\` via PATH, \`$PI_IDEA_CLOUDFLARED_PATH\`, and \`~/.local/bin/cloudflared\`. Only ask the user to install it if none are executable.
+- **Tunnel lifecycle is managed by a systemd user unit** (\`cloudflared-idea@<idea-name>.service\`; template installed by pi-idea): it runs cloudflared with \`--no-autoupdate\` (a self-update must never kill the tunnel), \`Restart=always\`, and starts at boot. \`scripts/tunnel.sh\` must NOT spawn cloudflared directly — manage the unit instead:
+  - ensure running: \`systemctl --user enable --now cloudflared-idea@${meta.name}.service\`
+  - restart: \`systemctl --user restart cloudflared-idea@${meta.name}.service\`
+  - stop: \`systemctl --user disable --now cloudflared-idea@${meta.name}.service\`
 - For interactive web apps that use WebSockets (Socket.IO, WS, etc.), cloudflared\'s default QUIC protocol drops the \`Upgrade: websocket\` header, causing \`400 Bad Request\` on connection. **Always add \`--protocol http2\` to the cloudflared command** in \`scripts/tunnel.sh\`.
 - Verify that the preview works without manual refreshes; avoid stale asset caching during preview and account for shared tunnel preview limitations or transport quirks.
 
@@ -582,10 +586,12 @@ async function setupNamedTunnel(idea: IdeaState, port?: number): Promise<string 
     }
     writeFileSync(configPath, configLines.join("\n") + "\n", "utf8");
 
-    // 8. Start the tunnel and verify the public origin before reporting it.
+    // 8. Start the tunnel: prefer a systemd user service (survives reboot,
+    // auto-restarts, --no-autoupdate); fall back to a hardened detached spawn.
     const cloudflared = resolveCloudflaredBinary(globalCfg);
     if (!cloudflared) throw new Error("cloudflared was not found in PATH, ~/.local/bin, or configured path");
-    if (!startTunnelProcess(idea, tokenStr, configPath, cloudflared)) {
+    const serviceStarted = startTunnelService(idea, tokenStr, cloudflared);
+    if (!serviceStarted && !startTunnelProcess(idea, tokenStr, configPath, cloudflared)) {
       throw new Error("cloudflared did not register a tunnel connection");
     }
     if (!await verifyPublicUrl(tunnelUrl)) {
@@ -632,6 +638,89 @@ export function rebuildConfigYaml(
     ]),
     "  - service: http_status:404",
   ];
+}
+
+const SYSTEMD_UNIT_NAME = "cloudflared-idea@.service";
+
+/** Check that the user's systemd session is usable (linger makes these survive logout/boot). */
+export function systemdUserAvailable(): boolean {
+  try {
+    execSync("systemctl --user is-system-running", { timeout: 3_000, stdio: "ignore" });
+    return true;
+  } catch {}
+  // "degraded" also exits non-zero but means systemd is up
+  try {
+    const out = execSync("systemctl --user is-system-running 2>&1", { timeout: 3_000, encoding: "utf8" });
+    return out.includes("degraded");
+  } catch {}
+  return false;
+}
+
+/** Install or refresh the template unit for per-idea tunnels. Idempotent. */
+function installTunnelUnitTemplate(cloudflared: string): string {
+  const unitDir = join(homedir(), ".config", "systemd", "user");
+  const unitPath = join(unitDir, SYSTEMD_UNIT_NAME);
+  const unit = `# Managed by pi-idea. Do not edit — regenerated on /idea run.\n[Unit]\nDescription=Cloudflare tunnel for pi-idea %i\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\n# --no-autoupdate: a self-update must never kill the tunnel\nExecStart=${cloudflared} tunnel --no-autoupdate --config %h/.cloudflared/config.yml run --token-file %h/.cloudflared/%i-token.raw\nRestart=always\nRestartSec=5\nStartLimitIntervalSec=0\nStandardOutput=journal\nStandardError=journal\n\n[Install]\nWantedBy=default.target\n`;
+  if (!existsSync(unitDir)) mkdirSync(unitDir, { recursive: true });
+  let changed = true;
+  try { changed = readFileSync(unitPath, "utf8") !== unit; } catch {}
+  if (changed) {
+    writeFileSync(unitPath, unit, "utf8");
+    execSync("systemctl --user daemon-reload", { timeout: 5_000, stdio: "ignore" });
+  }
+  return unitPath;
+}
+
+/** Stop a legacy PID-file-managed tunnel process, if any. */
+function killLegacyTunnel(idea: IdeaState) {
+  try {
+    const pid = parseInt(readFileSync(join(idea.root, ".tunnel.pid"), "utf8").trim(), 10);
+    if (pid > 0) { try { process.kill(pid, "SIGTERM"); } catch {} }
+  } catch {}
+}
+
+/** Start (or replace) the idea's tunnel as a systemd user service. */
+export function startTunnelService(idea: IdeaState, token: string, cloudflared: string): boolean {
+  try {
+    const cfDir = join(homedir(), ".cloudflared");
+    if (!existsSync(cfDir)) mkdirSync(cfDir, { recursive: true });
+    // --token-file expects the raw token, not the {token: ...} wrapper
+    const rawPath = join(cfDir, `${idea.name}-token.raw`);
+    writeFileSync(rawPath, token + "\n", "utf8");
+    chmodSync(rawPath, 0o600);
+
+    installTunnelUnitTemplate(cloudflared);
+    killLegacyTunnel(idea);
+    execSync(`systemctl --user enable --now cloudflared-idea@${idea.name}.service`, { timeout: 15_000, stdio: "ignore" });
+    return true;
+  } catch (err) {
+    console.error("startTunnelService failed:", String(err));
+    return false;
+  }
+}
+
+/** Stop and disable the idea's tunnel service (no-op if not installed). */
+export function stopTunnelService(idea: IdeaState): boolean {
+  if (!systemdUserAvailable()) return false;
+  try {
+    execSync(`systemctl --user disable --now cloudflared-idea@${idea.name}.service`, { timeout: 15_000, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Is the idea's tunnel unit active? "unknown" = unit not installed. */
+export function tunnelServiceState(ideaName: string): "active" | "inactive" | "unknown" {
+  if (!systemdUserAvailable()) return "unknown";
+  try {
+    const out = execSync(`systemctl --user is-active cloudflared-idea@${ideaName}.service 2>&1`, { timeout: 3_000, encoding: "utf8" }).trim();
+    if (out === "active") return "active";
+    if (out === "inactive" || out === "failed" || out === "not-found") return "inactive";
+    return "inactive";
+  } catch {
+    return "inactive";
+  }
 }
 
 export function resolveCloudflaredBinary(config: GlobalConfig = readGlobalConfig()): string | null {
@@ -718,7 +807,7 @@ function startTunnelProcess(idea: IdeaState, token: string, configPath: string, 
     writeFileSync(logPath, "", "utf8");
     const logFd = openSync(logPath, "a");
     const child = spawn(cloudflared, [
-      "tunnel", "--protocol", "http2", "--config", configPath, "run", "--token", token
+      "tunnel", "--protocol", "http2", "--no-autoupdate", "--config", configPath, "run", "--token", token
     ], {
       detached: true,
       stdio: ["ignore", logFd, logFd],
@@ -888,7 +977,7 @@ function goPrompt(idea: IdeaState) {
     "If the project is runnable, create the standard scripts in scripts/ (see requirements.md for the full contract).",
     "**SIGHUP hardening is mandatory** — all background server processes MUST use `nohup` + `disown` so they survive the calling shell exit. Without this, processes die silently as soon as the agent's shell returns.",
     "Include `scripts/restart-server.sh` — it restarts only the Node server without touching cloudflared, so the tunnel URL stays the same across restarts.",
-    "For web apps, do not serve on localhost alone. After implementing the server, create a tunnel with cloudflared, record the public URL as the primary preview URL, and surface only the tunnel URL to the user. The local URL is a fallback for debugging only.",
+    "For web apps, do not serve on localhost alone. After implementing the server, set up the tunnel (the /idea run command manages it as a hardened systemd unit), record the public URL as the primary preview URL, and surface only the tunnel URL to the user. The local URL is a fallback for debugging only.",
     "Discover cloudflared via PATH, $PI_IDEA_CLOUDFLARED_PATH, and ~/.local/bin/cloudflared. Only ask the user to install it if none are executable.",
     "For web apps that use WebSockets (Socket.IO, WS, etc.): cloudflared's default QUIC protocol drops the `Upgrade: websocket` header. The tunnel script MUST add `--protocol http2` to the cloudflared command.",
     "Validate the primary flows through the shared tunnel URL itself. Do not leave the preview in a state where users need manual refreshes after actions; fix caching, transport, or realtime update issues as part of the implementation.",
@@ -905,7 +994,8 @@ function goPrompt(idea: IdeaState) {
       lines.push(`Cloudflare API token is available (global config or env).`);
       lines.push(`Zone: ${globalCfg.domain} (ID: ${cfZoneId || 'auto-resolved from Cloudflare API'})`);
       lines.push(`The named tunnel will be set up automatically by the /idea run command.`);
-      lines.push(`If writing a tunnel.sh script manually, start cloudflared with: cloudflared tunnel --config ~/.cloudflared/config.yml run --token "\$(cat ~/.cloudflared/${idea.name}-token.json | node -e 'process.stdin.resume();let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).token))')\``);
+            lines.push(`The named tunnel is managed by the /idea run command as a systemd user unit (cloudflared-idea@${idea.name}.service) with --no-autoupdate and Restart=always — it survives reboots and cloudflared self-updates.`);
+      lines.push(`In scripts/tunnel.sh, manage the unit (do not spawn cloudflared directly): systemctl --user enable --now cloudflared-idea@${idea.name}.service; restart with systemctl --user restart ...; stop with systemctl --user disable --now ...`);
     } else {
       lines.push(`No Cloudflare API token configured. Set $PI_IDEA_CF_TOKEN or run /idea token <token>.`);
     }
@@ -933,20 +1023,24 @@ Behavior rules:
 - Standard scripts contract — you MUST create these scripts during implementation:
   \`scripts/run.sh\` — start server in background (use nohup + disown!), write {localUrl, port} to runtime.json
   \`scripts/stop.sh\` — kill server + tunnel, write {running: false} to runtime.json
-  \`scripts/tunnel.sh\` — start cloudflared, write {publicUrl, preferredUrl} to runtime.json
+  \`scripts/tunnel.sh\` — ensure the tunnel is running via its systemd unit, write {publicUrl, preferredUrl} to runtime.json
   \`scripts/status.sh\` — output JSON {running, localUrl, publicUrl, port} to stdout
   \`scripts/restart-server.sh\` — restart ONLY the server, keep tunnel alive (preserves URL!)
 - **SIGHUP hardening**: All background processes MUST use \`nohup\` + \`disown\`. Without this, server and tunnel processes die silently when the agent\'s shell exits.
 - **PID files, not pkill**: Write server/tunnel PIDs to files (e.g. \`.server.pid\`, \`.tunnel.pid\`). Kill by PID, never by \`pkill -f\` pattern — that kills any process whose command line happens to contain the search string (unrelated gateways, other Node servers).
 - **Tunnel URL volatility**: trycloudflare.com quick tunnels change URL on every start. To keep the same URL across restarts, use \`scripts/restart-server.sh\` (leaves cloudflared running).
 - For web apps, use a tunnel — do not serve on localhost alone. After implementing, start cloudflared and record the public tunnel URL as the primary preview URL. The local URL is a fallback for debugging only.
+- **Tunnel lifecycle is managed by a systemd user unit** (\`cloudflared-idea@<idea-name>.service\`; template installed by pi-idea): it runs cloudflared with \`--no-autoupdate\` (a self-update must never kill the tunnel), \`Restart=always\`, and starts at boot. \`scripts/tunnel.sh\` must NOT spawn cloudflared directly — manage the unit instead:
+  - ensure running: \`systemctl --user enable --now cloudflared-idea@<idea-name>.service\`
+  - restart: \`systemctl --user restart cloudflared-idea@<idea-name>.service\`
+  - stop: \`systemctl --user disable --now cloudflared-idea@<idea-name>.service\`
 - Discover cloudflared via PATH, \`$PI_IDEA_CLOUDFLARED_PATH\`, and \`~/.local/bin/cloudflared\`. Only ask the user to install it if none are executable.
 - Whenever you start, stop, or change a preview runtime, update runtime.json with public URL as preferredPreviewUrl and local URL as a fallback.
 - For interactive web apps that use WebSockets (Socket.IO, WS, etc.), cloudflared\'s default QUIC protocol drops the \`Upgrade: websocket\` header, causing \`400 Bad Request\`. The tunnel script MUST use \`--protocol http2\`.
 - Ensure the shared preview behaves correctly without manual refreshes; watch for stale cached assets and tunnel-specific transport or realtime quirks through the shared URL.
 - When the user asks for more changes after a previous implementation, update the spec first and then apply the changes only when they explicitly ask you to proceed.
 - If a custom domain is configured in the global config at \`~/.config/pi-idea.json\` (check the Custom Domain section in requirements.md), set up a **named Cloudflare tunnel** instead of a quick tunnel. The URL will be https://<idea-name>.<domain> and won't change on restarts.
-- \`scripts/tunnel.sh\` for named tunnels should use a cloudflared config file at \`~/.cloudflared/config.yml\` with ingress rules for the specific subdomain, and start cloudflared using \`--token <token>\` (read from \`~/.cloudflared/<idea-name>-token.json\`). Do not use bare \`cloudflared tunnel run\` (no origin cert).
+- \`scripts/tunnel.sh\` for named tunnels should manage the systemd unit \`cloudflared-idea@<idea-name>.service\` (enable --now / restart / disable --now). The unit reads the raw tunnel token from \`~/.cloudflared/<idea-name>-token.raw\` and the shared ingress config from \`~/.cloudflared/config.yml\`. Do not spawn cloudflared directly.
 - The Cloudflare API token can come from \`~/.config/pi-idea.json\` (\`cfToken\` field) or the \`$PI_IDEA_CF_TOKEN\` environment variable.
 `;
 }
@@ -1181,11 +1275,17 @@ export default function ideaExtension(pi: ExtensionAPI) {
         const server = detectRuntime(target);
         const port = detectServerPort(target);
         let tunnelAlive = false;
-        try {
-          const pid = Number(readFileSync(join(target.root, ".tunnel.pid"), "utf8"));
-          process.kill(pid, 0);
+        const unitState = tunnelServiceState(target.name);
+        if (unitState === "active") {
           tunnelAlive = true;
-        } catch {}
+        } else {
+          // Legacy PID-file-managed tunnel (pre-systemd ideas)
+          try {
+            const pid = Number(readFileSync(join(target.root, ".tunnel.pid"), "utf8"));
+            process.kill(pid, 0);
+            tunnelAlive = true;
+          } catch {}
+        }
         const publicUrl = String(runtime.publicUrl || runtime.preferredUrl || "");
         let dnsOk = false;
         let publicProbe: PublicProbe = { ok: false, detail: "no public URL recorded" };
@@ -1199,10 +1299,15 @@ export default function ideaExtension(pi: ExtensionAPI) {
           `${mark(Boolean(server.pid))} Server PID${server.pid ? ` ${server.pid}` : " not running"}`,
           `${mark(Boolean(port))} Local origin${port ? ` http://127.0.0.1:${port}` : " unavailable"}`,
           `${mark(Boolean(cloudflared))} cloudflared${cloudflared ? ` at ${cloudflared}` : " not found"}`,
-          `${mark(tunnelAlive)} Tunnel process${tunnelAlive ? " running" : " not running"}`,
+          `${mark(tunnelAlive)} Tunnel process${tunnelAlive ? (unitState === "active" ? " running (systemd unit)" : " running (legacy PID file)") : " not running"}`,
           `${mark(dnsOk)} Public DNS${publicUrl ? ` for ${new URL(publicUrl).hostname}` : " unavailable"}`,
           `${mark(publicProbe.ok)} Public app: ${publicProbe.detail}`,
         ];
+        // Dead-tunnel signature: local origin fine, public edge returns 530/1033
+        const publicDead = publicUrl && !publicProbe.ok && /HTTP 5[0-9][0-9]/.test(publicProbe.detail) && Boolean(port);
+        if (publicDead) {
+          lines.push(`\n⚠️  Public URL is unreachable while the local origin is up — the tunnel connection is dead (e.g. cloudflared self-update). Fix: /idea run ${target.name}  (re-registers the systemd tunnel, URL is preserved).`);
+        }
         ctx.ui.notify(lines.join("\n"), publicProbe.ok ? "info" : "warning");
         return;
       }
@@ -1366,6 +1471,8 @@ export default function ideaExtension(pi: ExtensionAPI) {
         if (!result.ok) {
           ctx.ui.notify(`${stopScript} failed:\n${result.stderr || result.stdout}`, "warning");
         }
+        // Stop the systemd tunnel unit if present, then legacy PID files
+        stopTunnelService(activeIdea);
         // Also try to kill by PID files
         const detected = detectRuntime(activeIdea);
         if (detected.pid) {
